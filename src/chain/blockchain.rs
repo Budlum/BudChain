@@ -1,6 +1,7 @@
 use crate::chain::finality::{FinalityCert, ValidatorEntry, ValidatorSetSnapshot};
 use crate::chain::genesis::{GenesisConfig, GENESIS_TIMESTAMP};
 use crate::chain::snapshot::PruningManager;
+use crate::consensus::pos::SlashingEvidence;
 use crate::consensus::qc::{QcBlob, QcFaultProof, QcProofAction, QcProofVerdict};
 use crate::consensus::ConsensusEngine;
 use crate::core::account::AccountState;
@@ -8,13 +9,26 @@ use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::chain_config::Network;
 use crate::core::transaction::Transaction;
+use crate::cross_domain::{
+    BridgeState, CrossDomainMessageRegistry, DomainEvent, DomainEventKind, MerkleProof, MessageKind,
+};
+use crate::domain::{
+    hash_finality_proof, BftFinalityAdapter, ConsensusDomain, ConsensusDomainRegistry,
+    ConsensusKind, DomainCommitment, DomainCommitmentRegistry, DomainFinalityAdapter, DomainId,
+    DomainPluginRegistry, DomainStatus, FinalityProof, FinalityStatus, PoAFinalityAdapter,
+    PoSFinalityAdapter, PoWFinalityAdapter, ZkFinalityAdapter,
+};
 use crate::execution::executor::Executor;
 use crate::mempool::pool::{Mempool, MempoolConfig};
+use crate::settlement::{
+    merkle_root, GlobalBlockHeader, ProofVerificationError, SettlementProofVerifier,
+    VerifiedDomainEvent,
+};
 use crate::storage::db::Storage;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::info;
+use tracing::{error, info, warn};
 
 pub const MAX_REORG_DEPTH: usize = 100;
 pub const FINALITY_DEPTH: usize = 50;
@@ -34,6 +48,14 @@ pub struct Blockchain {
     pub verified_qc_blobs: BTreeMap<u64, QcBlob>,
     pub validator_snapshots: BTreeMap<u64, ValidatorSetSnapshot>,
     pub pending_finality_certs: BTreeMap<u64, Vec<FinalityCert>>,
+    pub domain_registry: ConsensusDomainRegistry,
+    pub domain_commitment_registry: DomainCommitmentRegistry,
+    pub bridge_state: BridgeState,
+    pub global_headers: Vec<GlobalBlockHeader>,
+    pub plugin_registry: DomainPluginRegistry,
+    pub message_registry: CrossDomainMessageRegistry,
+    pub settlement_finality_hashes: Vec<crate::domain::Hash32>,
+    pub pending_slashing_evidence: Vec<SlashingEvidence>,
 }
 impl Blockchain {
     pub fn new(
@@ -42,7 +64,7 @@ impl Blockchain {
         chain_id: u64,
         pruning_manager: Option<PruningManager>,
     ) -> Self {
-        println!("Consensus: {}", consensus.info());
+        info!("Consensus: {}", consensus.info());
         let mut chain_vec = Vec::new();
         let mut state = AccountState::new();
 
@@ -52,7 +74,7 @@ impl Blockchain {
                 if !c.is_empty() {
                     chain_vec = c;
                     loaded_chain = true;
-                    println!("Loaded chain from DB: {} blocks", chain_vec.len());
+                    info!("Loaded chain from DB: {} blocks", chain_vec.len());
                 }
             }
         }
@@ -83,13 +105,13 @@ impl Blockchain {
                     snapshot_height = snapshot.height;
                     restored_finalized_height = snapshot.finalized_height;
                     restored_finalized_hash = snapshot.finalized_hash.clone();
-                    println!(
+                    info!(
                         "Restored state from snapshot at height {} (finalized={})",
                         snapshot_height, restored_finalized_height
                     );
                 } else {
-                    println!(
-                        " Snapshot chain_id mismatch (expected {}, got {}). Ignoring.",
+                    warn!(
+                        "Snapshot chain_id mismatch (expected {}, got {}). Ignoring.",
                         chain_id, snapshot.chain_id
                     );
                 }
@@ -101,14 +123,14 @@ impl Blockchain {
             (snapshot_height + 1) as usize
         } else {
             if snapshot_height >= chain_len as u64 {
-                println!(" Chain shorter than snapshot height! Replaying from Genesis.");
+                warn!("Chain shorter than snapshot height, replaying from genesis");
                 0
             } else {
                 0
             }
         };
 
-        println!(
+        info!(
             "Replaying blocks from index {} to {}...",
             start_index,
             chain_len - 1
@@ -124,7 +146,10 @@ impl Blockchain {
             state = match Self::apply_block_effects(&state, block) {
                 Ok(next_state) => next_state,
                 Err(e) => {
-                    println!("CRITICAL: Failed to apply block {} during init: {}. Corrupted database, exiting.", block.index, e);
+                    error!(
+                        "Failed to apply block {} during init: {}. Corrupted database, exiting.",
+                        block.index, e
+                    );
                     std::process::exit(1);
                 }
             };
@@ -145,8 +170,69 @@ impl Blockchain {
                     let _ = mempool.add_transaction(tx);
                 }
                 if count > 0 {
-                    println!("Restored {} transactions from mempool persistence", count);
+                    info!("Restored {} transactions from mempool persistence", count);
                 }
+            }
+        }
+
+        let mut domain_registry = ConsensusDomainRegistry::new();
+        let mut domain_commitment_registry = DomainCommitmentRegistry::new();
+        let mut bridge_state = BridgeState::new();
+        let mut global_headers = Vec::new();
+        let mut message_registry = CrossDomainMessageRegistry::new();
+
+        if let Some(ref store) = storage {
+            if let Ok(domains) = store.load_consensus_domains() {
+                for domain in domains {
+                    if let Err(e) = Self::validate_consensus_domain_registration(&domain) {
+                        warn!("Skipping invalid stored consensus domain: {}", e);
+                        continue;
+                    }
+                    if let Err(e) = domain_registry.register(domain) {
+                        warn!("Skipping duplicate stored consensus domain: {}", e);
+                    }
+                }
+            }
+
+            if let Ok(commitments) = store.load_domain_commitments() {
+                for commitment in commitments {
+                    if let Err(e) = Self::validate_stored_domain_commitment_metadata(
+                        &domain_registry,
+                        &commitment,
+                    ) {
+                        warn!("Skipping invalid stored domain commitment: {}", e);
+                        continue;
+                    }
+                    if let Err(e) = domain_commitment_registry.insert(commitment.clone()) {
+                        warn!("Skipping duplicate stored domain commitment: {}", e);
+                    } else {
+                        for (addr, new_nonce) in &commitment.state_updates {
+                            if *new_nonce > state.get_nonce(addr) {
+                                let account = state.get_or_create(addr);
+                                account.nonce = *new_nonce;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Ok(Some(stored_bridge_state)) = store.load_bridge_state() {
+                bridge_state = stored_bridge_state;
+            }
+
+            if let Ok(stored_global_headers) = store.load_global_headers() {
+                global_headers =
+                    Self::validated_global_header_prefix(stored_global_headers, chain_id);
+            }
+
+            if let Ok(messages) = store.load_cross_domain_messages() {
+                let mut registry = CrossDomainMessageRegistry::new();
+                for msg in messages {
+                    if let Err(e) = registry.insert(msg) {
+                        warn!("Skipping duplicate cross domain message: {}", e);
+                    }
+                }
+                message_registry = registry;
             }
         }
 
@@ -164,6 +250,14 @@ impl Blockchain {
             verified_qc_blobs: BTreeMap::new(),
             validator_snapshots,
             pending_finality_certs: BTreeMap::new(),
+            domain_registry,
+            domain_commitment_registry,
+            bridge_state,
+            global_headers,
+            plugin_registry: DomainPluginRegistry::new(),
+            message_registry,
+            settlement_finality_hashes: Vec::new(),
+            pending_slashing_evidence: Vec::new(),
         };
 
         if let Some(first) = bc.chain.first() {
@@ -171,8 +265,8 @@ impl Blockchain {
         } else {
             bc.genesis_time = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis();
+                .map(|duration| duration.as_millis())
+                .unwrap_or_default();
         }
 
         bc
@@ -199,7 +293,7 @@ impl Blockchain {
         }
         blocks.reverse();
         self.chain = blocks;
-        println!("Loaded {} blocks from disk", self.chain.len());
+        info!("Loaded {} blocks from disk", self.chain.len());
         if let Some(store) = &self.storage {
             let _ = self.consensus.load_state(store);
         }
@@ -216,6 +310,798 @@ impl Blockchain {
     }
     pub fn last_block(&self) -> &Block {
         self.chain.last().expect("Chain should never be empty")
+    }
+
+    pub fn register_consensus_domain(&mut self, domain: ConsensusDomain) -> Result<(), String> {
+        Self::validate_consensus_domain_registration(&domain)?;
+        self.domain_registry.register(domain.clone())?;
+        if let Some(store) = &self.storage {
+            store
+                .save_consensus_domain(&domain)
+                .map_err(|e| format!("Failed to persist consensus domain: {}", e))?;
+        }
+        Ok(())
+    }
+
+    pub fn submit_slashing_evidence(&mut self, evidence: SlashingEvidence) -> Result<(), String> {
+        if !Self::verify_slashing_evidence(&evidence) {
+            return Err("Invalid slashing evidence".into());
+        }
+        if self.pending_slashing_evidence.iter().any(|existing| {
+            existing.header1.hash == evidence.header1.hash
+                && existing.header2.hash == evidence.header2.hash
+                && existing.signature1 == evidence.signature1
+                && existing.signature2 == evidence.signature2
+        }) {
+            return Ok(());
+        }
+        self.pending_slashing_evidence.push(evidence);
+        Ok(())
+    }
+
+    pub fn drain_local_slashing_evidence(&mut self) -> Vec<SlashingEvidence> {
+        let mut evidence = self
+            .consensus
+            .drain_slashing_evidence()
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to drain consensus slashing evidence: {}", e);
+                Vec::new()
+            });
+        for item in &evidence {
+            let _ = self.submit_slashing_evidence(item.clone());
+        }
+        evidence.extend(self.pending_slashing_evidence.clone());
+        evidence
+    }
+
+    fn verify_slashing_evidence(evidence: &SlashingEvidence) -> bool {
+        if evidence.header1.index != evidence.header2.index {
+            return false;
+        }
+        if evidence.header1.producer != evidence.header2.producer {
+            return false;
+        }
+        if evidence.header1.producer.is_none() {
+            return false;
+        }
+        if evidence.header1.hash == evidence.header2.hash {
+            return false;
+        }
+        evidence.header1.verify_signature(&evidence.signature1)
+            && evidence.header2.verify_signature(&evidence.signature2)
+    }
+
+    fn validate_consensus_domain_registration(domain: &ConsensusDomain) -> Result<(), String> {
+        if domain.id == 0 {
+            return Err("Consensus domain id 0 is reserved".into());
+        }
+        if domain.domain_chain_id == 0 {
+            return Err(format!("Domain {} has invalid chain id 0", domain.id));
+        }
+
+        let expected_adapter = match &domain.kind {
+            ConsensusKind::PoW => Some("pow-confirmation-depth"),
+            ConsensusKind::PoS => Some("pos-qc-finality"),
+            ConsensusKind::PoA => Some("poa-authority-quorum"),
+            ConsensusKind::Bft => Some("bft-quorum-commit"),
+            ConsensusKind::Zk => Some("zk-proof-verification"),
+            ConsensusKind::Custom(name) => {
+                if name.trim().is_empty() {
+                    return Err(format!(
+                        "Domain {} has empty custom consensus name",
+                        domain.id
+                    ));
+                }
+                None
+            }
+        };
+
+        if let Some(expected) = expected_adapter {
+            if domain.finality_adapter != expected {
+                return Err(format!(
+                    "Domain {} adapter mismatch: expected {}, got {}",
+                    domain.id, expected, domain.finality_adapter
+                ));
+            }
+        } else if domain.finality_adapter.trim().is_empty() {
+            return Err(format!("Domain {} has empty finality adapter", domain.id));
+        }
+
+        Ok(())
+    }
+
+    fn validate_stored_domain_commitment_metadata(
+        registry: &ConsensusDomainRegistry,
+        commitment: &DomainCommitment,
+    ) -> Result<(), String> {
+        let domain = registry
+            .get(commitment.domain_id)
+            .ok_or_else(|| format!("Unknown consensus domain {}", commitment.domain_id))?;
+        if !domain.is_active() {
+            return Err(format!("Domain {} is not active", commitment.domain_id));
+        }
+        if domain.kind != commitment.consensus_kind {
+            return Err(format!(
+                "Commitment consensus kind mismatch for domain {}",
+                commitment.domain_id
+            ));
+        }
+        Ok(())
+    }
+
+    fn validated_global_header_prefix(
+        headers: Vec<GlobalBlockHeader>,
+        chain_id: u64,
+    ) -> Vec<GlobalBlockHeader> {
+        let mut valid = Vec::new();
+        let mut expected_height = 0u64;
+        let mut expected_prev_hash = [0u8; 32];
+
+        for header in headers {
+            if header.chain_id != chain_id {
+                warn!(
+                    "Skipping stored global header with wrong chain id: height={}, chain_id={}",
+                    header.global_height, header.chain_id
+                );
+                break;
+            }
+            if header.global_height != expected_height {
+                warn!(
+                    "Skipping stored global header with non-contiguous height: expected={}, got={}",
+                    expected_height, header.global_height
+                );
+                break;
+            }
+            if header.previous_global_hash != expected_prev_hash {
+                warn!(
+                    "Skipping stored global header with broken hash chain: height={}",
+                    header.global_height
+                );
+                break;
+            }
+
+            expected_prev_hash = header.calculate_hash_bytes();
+            expected_height += 1;
+            valid.push(header);
+        }
+
+        valid
+    }
+
+    #[cfg(not(test))]
+    pub fn submit_domain_commitment(
+        &mut self,
+        _commitment: DomainCommitment,
+    ) -> Result<(), String> {
+        Err(
+            "Raw domain commitment submission is disabled; verified finality proof is required"
+                .into(),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn submit_domain_commitment(&mut self, commitment: DomainCommitment) -> Result<(), String> {
+        self.accept_domain_commitment(commitment)
+    }
+
+    fn accept_domain_commitment(&mut self, commitment: DomainCommitment) -> Result<(), String> {
+        let domain = self.validate_domain_commitment_metadata(&commitment)?;
+
+        if domain.status == DomainStatus::Frozen {
+            return Err(format!("Domain {} is frozen", commitment.domain_id));
+        }
+
+        if domain.validator_set_hash != [0u8; 32]
+            && commitment.validator_set_hash != domain.validator_set_hash
+        {
+            return Err(format!(
+                "Commitment validator set hash mismatch for domain {}",
+                commitment.domain_id
+            ));
+        }
+
+        if commitment.domain_height <= domain.last_committed_height {
+            if let Some(existing) = self
+                .domain_commitment_registry
+                .find_by_height(commitment.domain_id, commitment.domain_height)
+            {
+                if existing.domain_block_hash == commitment.domain_block_hash {
+                    return Ok(());
+                }
+                let d_mut = self
+                    .domain_registry
+                    .get_mut(commitment.domain_id)
+                    .ok_or_else(|| format!("Domain {} not found", commitment.domain_id))?;
+                d_mut.status = DomainStatus::Frozen;
+                if let Some(store) = &self.storage {
+                    let _ = store.save_consensus_domain(d_mut);
+                }
+                return Err(format!(
+                    "Equivocation or invalid sequence detected for domain {} height {}",
+                    commitment.domain_id, commitment.domain_height
+                ));
+            }
+            if commitment.domain_height == domain.last_committed_height
+                && commitment.domain_block_hash == domain.last_committed_hash
+            {
+                return Ok(());
+            }
+            return Err(format!(
+                "Stale or conflicting commitment for domain {} height {}",
+                commitment.domain_id, commitment.domain_height
+            ));
+        }
+
+        if let Some(existing) = self
+            .domain_commitment_registry
+            .find_by_height(commitment.domain_id, commitment.domain_height)
+        {
+            if existing.domain_block_hash == commitment.domain_block_hash
+                && existing.sequence == commitment.sequence
+            {
+                return Ok(());
+            } else {
+                let d_mut = self
+                    .domain_registry
+                    .get_mut(commitment.domain_id)
+                    .ok_or_else(|| format!("Domain {} not found", commitment.domain_id))?;
+                d_mut.status = DomainStatus::Frozen;
+                if let Some(store) = &self.storage {
+                    let _ = store.save_consensus_domain(d_mut);
+                }
+                return Err(format!(
+                    "Equivocation or invalid sequence detected for domain {} height {}",
+                    commitment.domain_id, commitment.domain_height
+                ));
+            }
+        }
+
+        if commitment.domain_height == domain.last_committed_height + 1 {
+            self.validate_commitment_state_updates(&commitment)?;
+        }
+
+        self.domain_commitment_registry.insert(commitment.clone())?;
+        let updated_domains = self.apply_pending_commitments(commitment.domain_id)?;
+
+        if let Some(store) = &self.storage {
+            store
+                .save_domain_commitment_batch(&commitment, &updated_domains)
+                .map_err(|e| {
+                    format!(
+                        "Failed to atomically persist domain commitment batch: {}",
+                        e
+                    )
+                })?;
+        }
+
+        Ok(())
+    }
+
+    fn validate_commitment_state_updates(
+        &self,
+        commitment: &DomainCommitment,
+    ) -> Result<(), String> {
+        for (addr, new_nonce) in &commitment.state_updates {
+            if *new_nonce <= self.state.get_nonce(addr) {
+                return Err(format!(
+                    "Commitment nonce invariant violation for domain {} height {}",
+                    commitment.domain_id, commitment.domain_height
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_pending_commitments(
+        &mut self,
+        domain_id: DomainId,
+    ) -> Result<Vec<ConsensusDomain>, String> {
+        let mut updated_domains = Vec::new();
+        loop {
+            let last_height = self
+                .domain_registry
+                .get(domain_id)
+                .ok_or_else(|| format!("Domain {} not found", domain_id))?
+                .last_committed_height;
+            let next_height = last_height + 1;
+            #[cfg(not(test))]
+            let last_hash = self
+                .domain_registry
+                .get(domain_id)
+                .ok_or_else(|| format!("Domain {} not found", domain_id))?
+                .last_committed_hash;
+
+            if let Some(com) = self
+                .domain_commitment_registry
+                .find_by_height(domain_id, next_height)
+            {
+                #[cfg(not(test))]
+                if last_hash != [0u8; 32] && com.parent_domain_block_hash != last_hash {
+                    let d_mut = self
+                        .domain_registry
+                        .get_mut(domain_id)
+                        .ok_or_else(|| format!("Domain {} not found", domain_id))?;
+                    d_mut.status = DomainStatus::Frozen;
+                    return Err(format!(
+                        "Domain {} parent hash mismatch at height {}",
+                        domain_id, next_height
+                    ));
+                }
+
+                self.validate_commitment_state_updates(&com)?;
+
+                for (addr, new_nonce) in &com.state_updates {
+                    let account = self.state.get_or_create(addr);
+                    account.nonce = *new_nonce;
+                }
+
+                let d_mut = self
+                    .domain_registry
+                    .get_mut(domain_id)
+                    .ok_or_else(|| format!("Domain {} not found", domain_id))?;
+                d_mut.last_committed_height = next_height;
+                d_mut.last_committed_hash = com.domain_block_hash;
+
+                updated_domains.push(d_mut.clone());
+            } else {
+                break;
+            }
+        }
+        Ok(updated_domains)
+    }
+
+    pub fn submit_verified_domain_commitment(
+        &mut self,
+        commitment: DomainCommitment,
+        proof: FinalityProof,
+    ) -> Result<(), String> {
+        self.verify_domain_commitment_finality(&commitment, &proof)?;
+        self.accept_domain_commitment(commitment)
+    }
+
+    pub fn verify_domain_commitment_finality(
+        &self,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<(), String> {
+        let domain = self.validate_domain_commitment_metadata(commitment)?;
+        let expected_proof_hash = hash_finality_proof(proof);
+        if commitment.finality_proof_hash != expected_proof_hash {
+            return Err(format!(
+                "Finality proof hash mismatch for domain {} height {}",
+                commitment.domain_id, commitment.domain_height
+            ));
+        }
+
+        let status = match domain.kind {
+            ConsensusKind::PoW => {
+                let adapter = PoWFinalityAdapter::default();
+                self.ensure_adapter_name(domain, adapter.adapter_name())?;
+                adapter.verify_finality(domain, commitment, proof)
+            }
+            ConsensusKind::PoS => {
+                let adapter = PoSFinalityAdapter;
+                self.ensure_adapter_name(domain, adapter.adapter_name())?;
+                adapter.verify_finality(domain, commitment, proof)
+            }
+            ConsensusKind::PoA => {
+                let adapter = PoAFinalityAdapter::default();
+                self.ensure_adapter_name(domain, adapter.adapter_name())?;
+                adapter.verify_finality(domain, commitment, proof)
+            }
+            ConsensusKind::Bft => {
+                let adapter = BftFinalityAdapter::default();
+                self.ensure_adapter_name(domain, adapter.adapter_name())?;
+                adapter.verify_finality(domain, commitment, proof)
+            }
+            ConsensusKind::Zk => {
+                let adapter = ZkFinalityAdapter;
+                self.ensure_adapter_name(domain, adapter.adapter_name())?;
+                adapter.verify_finality(domain, commitment, proof)
+            }
+            ConsensusKind::Custom(_) => {
+                if let Some(plugin) = self.plugin_registry.get(domain.id) {
+                    let fa = plugin.finality_adapter();
+                    self.ensure_adapter_name(domain, fa.adapter_name())?;
+                    fa.verify_finality(domain, commitment, proof)
+                } else {
+                    return Err(format!(
+                        "No plugin registered for custom domain {}",
+                        commitment.domain_id
+                    ));
+                }
+            }
+        }
+        .map_err(|e| e.to_string())?;
+
+        match status {
+            FinalityStatus::Finalized => Ok(()),
+            FinalityStatus::Pending {
+                required_depth,
+                observed_depth,
+            } => Err(format!(
+                "Domain commitment is not finalized: required={}, observed={}",
+                required_depth, observed_depth
+            )),
+            FinalityStatus::Rejected(reason) => {
+                Err(format!("Domain commitment finality rejected: {}", reason))
+            }
+        }
+    }
+
+    fn validate_domain_commitment_metadata(
+        &self,
+        commitment: &DomainCommitment,
+    ) -> Result<&ConsensusDomain, String> {
+        let domain = self
+            .domain_registry
+            .get(commitment.domain_id)
+            .ok_or_else(|| format!("Unknown consensus domain {}", commitment.domain_id))?;
+
+        if domain.status == DomainStatus::Frozen {
+            return Err(format!("Domain {} is frozen", commitment.domain_id));
+        }
+
+        if !domain.is_active() {
+            return Err(format!("Domain {} is not active", commitment.domain_id));
+        }
+
+        if domain.kind != commitment.consensus_kind {
+            return Err(format!(
+                "Commitment consensus kind mismatch for domain {}",
+                commitment.domain_id
+            ));
+        }
+
+        Ok(domain)
+    }
+
+    fn ensure_adapter_name(
+        &self,
+        domain: &ConsensusDomain,
+        expected: &'static str,
+    ) -> Result<(), String> {
+        if domain.finality_adapter != expected {
+            return Err(format!(
+                "Domain {} finality adapter mismatch: expected {}, got {}",
+                domain.id, expected, domain.finality_adapter
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn build_global_header(&self, proposer: Option<Address>) -> GlobalBlockHeader {
+        let previous_global_hash = self
+            .global_headers
+            .last()
+            .map(GlobalBlockHeader::calculate_hash_bytes)
+            .unwrap_or([0u8; 32]);
+
+        let settlement_finality_root = if self.settlement_finality_hashes.is_empty() {
+            merkle_root(&[])
+        } else {
+            merkle_root(&self.settlement_finality_hashes)
+        };
+
+        GlobalBlockHeader {
+            version: 1,
+            global_height: self.global_headers.len() as u64,
+            previous_global_hash,
+            chain_id: self.chain_id,
+            timestamp_ms: self.global_headers.len() as u128,
+            domain_registry_root: self.domain_registry.root(),
+            domain_commitment_root: self.domain_commitment_registry.root(),
+            message_root: self.message_registry.root(),
+            bridge_state_root: self.bridge_state.root(),
+            replay_nonce_root: self.bridge_state.replay_root(),
+            proposer,
+            settlement_finality_root,
+        }
+    }
+
+    pub fn seal_global_header(
+        &mut self,
+        proposer: Option<Address>,
+    ) -> Result<GlobalBlockHeader, String> {
+        let header = self.build_global_header(proposer);
+        if let Some(store) = &self.storage {
+            store
+                .save_global_header(&header)
+                .map_err(|e| format!("Failed to persist global header: {}", e))?;
+        }
+        self.global_headers.push(header.clone());
+        Ok(header)
+    }
+
+    pub fn verify_domain_event_proof(
+        &self,
+        domain_id: crate::domain::DomainId,
+        domain_height: u64,
+        sequence: u64,
+        expected_block_hash: Option<crate::domain::Hash32>,
+        event: DomainEvent,
+        proof: &MerkleProof,
+    ) -> Result<VerifiedDomainEvent, ProofVerificationError> {
+        SettlementProofVerifier::verify_event_from_registry(
+            &self.domain_commitment_registry,
+            domain_id,
+            domain_height,
+            sequence,
+            expected_block_hash,
+            event,
+            proof,
+        )
+    }
+
+    pub fn mint_bridge_transfer_from_verified_event(
+        &mut self,
+        source_domain: crate::domain::DomainId,
+        source_height: u64,
+        sequence: u64,
+        expected_block_hash: Option<crate::domain::Hash32>,
+        event: DomainEvent,
+        proof: &MerkleProof,
+    ) -> Result<(), String> {
+        let verified = self
+            .verify_domain_event_proof(
+                source_domain,
+                source_height,
+                sequence,
+                expected_block_hash,
+                event,
+                proof,
+            )
+            .map_err(|e| e.to_string())?;
+
+        if verified.event.kind != DomainEventKind::BridgeLocked {
+            return Err("Verified event is not a bridge lock event".into());
+        }
+
+        let verified_event_hash = verified.event.leaf_hash();
+        let message = verified
+            .event
+            .message
+            .clone()
+            .ok_or_else(|| "Verified bridge lock event is missing message".to_string())?;
+
+        if message.kind != MessageKind::BridgeLock {
+            return Err("Verified event message is not a bridge lock message".into());
+        }
+        if verified.event.payload_hash != message.payload_hash {
+            return Err("Verified bridge event payload hash mismatch".into());
+        }
+        if let Some(expected_event_hash) = self.bridge_state.source_event_hash(&message.message_id)
+        {
+            if expected_event_hash != verified_event_hash {
+                return Err("Verified bridge source event hash mismatch".into());
+            }
+        }
+
+        self.bridge_state
+            .mint(&message)
+            .map_err(|e| e.to_string())?;
+
+        if let Some(store) = &self.storage {
+            store
+                .save_bridge_state(&self.bridge_state)
+                .map_err(|e| format!("Failed to persist bridge state: {}", e))?;
+        }
+        Ok(())
+    }
+
+    pub fn register_bridge_asset(
+        &mut self,
+        asset_id: crate::cross_domain::AssetId,
+        domain: crate::domain::DomainId,
+    ) -> Result<(), String> {
+        let domain_ref = self
+            .domain_registry
+            .get(domain)
+            .ok_or_else(|| format!("Domain {} not found", domain))?;
+        if !domain_ref.is_active() || !domain_ref.bridge_enabled {
+            return Err(format!("Domain {} is not bridge-enabled", domain));
+        }
+        self.bridge_state
+            .register_asset(asset_id, domain)
+            .map_err(|e| e.to_string())?;
+        if let Some(store) = &self.storage {
+            store
+                .save_bridge_state(&self.bridge_state)
+                .map_err(|e| format!("Failed to persist bridge state: {}", e))?;
+        }
+        Ok(())
+    }
+
+    pub fn lock_bridge_transfer(
+        &mut self,
+        source_domain: crate::domain::DomainId,
+        target_domain: crate::domain::DomainId,
+        source_height: u64,
+        event_index: u32,
+        asset_id: crate::cross_domain::AssetId,
+        owner: Address,
+        recipient: Address,
+        amount: u128,
+        expiry_height: u64,
+    ) -> Result<(crate::cross_domain::BridgeTransfer, DomainEvent), String> {
+        for domain_id in [source_domain, target_domain] {
+            let domain = self
+                .domain_registry
+                .get(domain_id)
+                .ok_or_else(|| format!("Domain {} not found", domain_id))?;
+            if !domain.is_active() || !domain.bridge_enabled {
+                return Err(format!("Domain {} is not bridge-enabled", domain_id));
+            }
+        }
+        if source_domain == target_domain {
+            return Err("Bridge source and target domains must differ".into());
+        }
+        if amount == 0 {
+            return Err("Bridge transfer amount must be non-zero".into());
+        }
+        if expiry_height <= source_height {
+            return Err("Bridge transfer expiry must be after source height".into());
+        }
+        let result = self
+            .bridge_state
+            .lock(
+                source_domain,
+                target_domain,
+                source_height,
+                event_index,
+                asset_id,
+                owner,
+                recipient,
+                amount,
+                expiry_height,
+            )
+            .map_err(|e| e.to_string())?;
+        if let Some(store) = &self.storage {
+            store
+                .save_bridge_state(&self.bridge_state)
+                .map_err(|e| format!("Failed to persist bridge state: {}", e))?;
+        }
+        if let Some(message) = result.1.message.clone() {
+            self.submit_cross_domain_message(message)?;
+        }
+        Ok(result)
+    }
+
+    pub fn submit_cross_domain_message(
+        &mut self,
+        message: crate::cross_domain::CrossDomainMessage,
+    ) -> Result<(), String> {
+        self.message_registry.insert(message.clone())?;
+        if let Some(store) = &self.storage {
+            store
+                .save_cross_domain_message(&message)
+                .map_err(|e| format!("Failed to persist cross-domain message: {}", e))?;
+        }
+        Ok(())
+    }
+
+    pub fn burn_bridge_transfer(
+        &mut self,
+        message_id: crate::cross_domain::MessageId,
+        domain: crate::domain::DomainId,
+    ) -> Result<(), String> {
+        let _ = (message_id, domain);
+        Err("Raw bridge burn is disabled; use a target-domain burn event path".into())
+    }
+
+    pub fn burn_bridge_transfer_with_event(
+        &mut self,
+        message_id: crate::cross_domain::MessageId,
+        domain: crate::domain::DomainId,
+        domain_height: u64,
+        event_index: u32,
+        expiry_height: u64,
+    ) -> Result<DomainEvent, String> {
+        let event = self
+            .bridge_state
+            .burn_with_event(
+                message_id,
+                domain,
+                domain_height,
+                event_index,
+                expiry_height,
+            )
+            .map_err(|e| e.to_string())?;
+        if let Some(store) = &self.storage {
+            store
+                .save_bridge_state(&self.bridge_state)
+                .map_err(|e| format!("Failed to persist bridge state: {}", e))?;
+        }
+        if let Some(message) = event.message.clone() {
+            self.submit_cross_domain_message(message)?;
+        }
+        Ok(event)
+    }
+
+    pub fn unlock_bridge_transfer(
+        &mut self,
+        message_id: crate::cross_domain::MessageId,
+        source_domain: crate::domain::DomainId,
+    ) -> Result<(), String> {
+        let _ = (message_id, source_domain);
+        Err("Raw bridge unlock is disabled; use a verified bridge burn event".into())
+    }
+
+    pub fn unlock_bridge_transfer_from_verified_event(
+        &mut self,
+        target_domain: crate::domain::DomainId,
+        target_height: u64,
+        sequence: u64,
+        expected_block_hash: Option<crate::domain::Hash32>,
+        event: DomainEvent,
+        proof: &MerkleProof,
+    ) -> Result<(), String> {
+        let verified = self
+            .verify_domain_event_proof(
+                target_domain,
+                target_height,
+                sequence,
+                expected_block_hash,
+                event,
+                proof,
+            )
+            .map_err(|e| e.to_string())?;
+
+        if verified.event.kind != DomainEventKind::BridgeBurned {
+            return Err("Verified event is not a bridge burn event".into());
+        }
+
+        let message = verified
+            .event
+            .message
+            .clone()
+            .ok_or_else(|| "Verified bridge burn event is missing message".to_string())?;
+
+        if message.kind != MessageKind::BridgeBurn {
+            return Err("Verified event message is not a bridge burn message".into());
+        }
+        if !message.verify_id() {
+            return Err("Verified bridge burn message id is invalid".into());
+        }
+        if verified.event.payload_hash != message.payload_hash {
+            return Err("Verified bridge burn event payload hash mismatch".into());
+        }
+
+        let transfer_id = message
+            .correlation_id
+            .ok_or_else(|| "Verified bridge burn message is missing correlation id".to_string())?;
+        let transfer = self
+            .bridge_state
+            .transfer(&transfer_id)
+            .ok_or_else(|| "Unknown bridge transfer".to_string())?;
+        let source_domain = transfer.source_domain;
+        if transfer.target_domain != message.source_domain {
+            return Err("Verified bridge burn source domain mismatch".into());
+        }
+        if source_domain != message.target_domain {
+            return Err("Verified bridge burn target domain mismatch".into());
+        }
+        if transfer.recipient != message.sender {
+            return Err("Verified bridge burn sender mismatch".into());
+        }
+        if transfer.owner != message.recipient {
+            return Err("Verified bridge burn recipient mismatch".into());
+        }
+        let expected_payload_hash =
+            crate::cross_domain::bridge::bridge_payload_hash(transfer.asset_id, transfer.amount);
+        if message.payload_hash != expected_payload_hash {
+            return Err("Verified bridge burn payload does not match transfer".into());
+        }
+
+        self.bridge_state
+            .unlock(transfer_id, source_domain)
+            .map_err(|e| e.to_string())?;
+        if let Some(store) = &self.storage {
+            store
+                .save_bridge_state(&self.bridge_state)
+                .map_err(|e| format!("Failed to persist bridge state: {}", e))?;
+        }
+        Ok(())
     }
     pub fn get_transaction_by_hash(&self, hash: &str) -> Option<Transaction> {
         if let Some(ref store) = self.storage {
@@ -596,7 +1482,7 @@ impl Blockchain {
                 if temp_state.validate_transaction(tx).is_err() {
                     continue;
                 }
-                if Executor::apply_transaction(&mut temp_state, tx).is_ok() {
+                if Executor::apply_transaction_checked(&mut temp_state, tx).is_ok() {
                     valid_txs.push(tx.clone());
                     included.insert(tx.hash.clone());
                     progress = true;
@@ -606,7 +1492,7 @@ impl Blockchain {
 
         for tx in &pending_txs {
             if !included.contains(&tx.hash) && self.state.validate_transaction(tx).is_err() {
-                println!("Discarding invalid transaction: {}", tx.hash);
+                warn!("Discarding invalid transaction: {}", tx.hash);
             }
         }
 
@@ -648,7 +1534,7 @@ impl Blockchain {
         block: &Block,
     ) -> Result<AccountState, String> {
         let mut next_state = base_state.clone();
-        Executor::apply_block(
+        Executor::apply_block_checked(
             &mut next_state,
             &block.transactions,
             block.producer.as_ref(),
@@ -660,9 +1546,16 @@ impl Blockchain {
 
     pub fn produce_block(&mut self, producer_address: Address) -> Option<Block> {
         let index = self.chain.len() as u64;
-        let previous_hash = self.chain.last().unwrap().hash.clone();
+        let previous_hash = self
+            .chain
+            .last()
+            .map(|block| block.hash.clone())
+            .unwrap_or_else(|| "0".repeat(64));
         let valid_txs = self.collect_block_transactions();
         let mut block = Block::new(index, previous_hash, valid_txs);
+        if !self.pending_slashing_evidence.is_empty() {
+            block.slashing_evidence = Some(self.pending_slashing_evidence.clone());
+        }
         block.producer = Some(producer_address);
         block.timestamp =
             self.genesis_time + (index as u128 * crate::core::chain_config::SLOT_MS as u128);
@@ -694,13 +1587,16 @@ impl Blockchain {
         }
 
         self.chain.push(block.clone());
+        if block.slashing_evidence.is_some() {
+            self.pending_slashing_evidence.clear();
+        }
 
         if let Some(last_block) = self.chain.last() {
             if let Err(e) = self
                 .consensus
                 .record_block(last_block, self.storage.as_ref())
             {
-                println!("Engine record block error: {}", e);
+                warn!("Engine record block error: {}", e);
             }
         }
 
@@ -803,7 +1699,7 @@ impl Blockchain {
                     return Err(format!("Invalid transaction at index {}: {}", i, e));
                 }
             }
-            if let Err(e) = Executor::apply_transaction(&mut temp_state, tx) {
+            if let Err(e) = Executor::apply_transaction_checked(&mut temp_state, tx) {
                 return Err(format!("Failed to apply transaction at index {}: {}", i, e));
             }
         }
@@ -835,7 +1731,7 @@ impl Blockchain {
                 .consensus
                 .record_block(last_block, self.storage.as_ref())
             {
-                println!("Engine record block error: {}", e);
+                warn!("Engine record block error: {}", e);
             }
         }
 
@@ -862,9 +1758,9 @@ impl Blockchain {
                     self.finalized_hash.clone(),
                 );
                 if let Err(e) = pruning_manager.save_snapshot(&snapshot) {
-                    println!("Failed to save snapshot at height {}: {}", height, e);
+                    warn!("Failed to save snapshot at height {}: {}", height, e);
                 } else {
-                    println!("Saved state snapshot at height {}", height);
+                    info!("Saved state snapshot at height {}", height);
 
                     let prunable = pruning_manager.get_prunable_blocks(
                         self.chain.len() as u64,
@@ -876,7 +1772,7 @@ impl Blockchain {
                             for block_index in &prunable {
                                 let _ = store.delete_block(*block_index);
                             }
-                            println!("Pruned {} old blocks from disk", prunable.len());
+                            info!("Pruned {} old blocks from disk", prunable.len());
                         }
                     }
                 }
@@ -895,7 +1791,7 @@ impl Blockchain {
                 .consensus
                 .validate_block(block, previous_chain, &dummy_state)
             {
-                println!("Block {} validation failed: {}", i, e);
+                warn!("Block {} validation failed: {}", i, e);
                 return false;
             }
         }
@@ -963,7 +1859,7 @@ impl Blockchain {
             return Err("Cannot reorg past finality depth".to_string());
         }
 
-        println!(
+        info!(
             "Reorg: replacing {} blocks from height {}",
             reorg_depth, fork_point
         );
@@ -1035,15 +1931,12 @@ impl Blockchain {
         Ok(state)
     }
     pub fn print_info(&self) {
-        println!("================================");
-        println!("Blockchain Info");
-        println!("================================");
-        println!("Consensus: {}", self.consensus.info());
-        println!("Length: {}", self.chain.len());
-        println!("Pending Tx: {}", self.mempool.len());
-        println!("================================");
+        info!("Blockchain Info");
+        info!("Consensus: {}", self.consensus.info());
+        info!("Length: {}", self.chain.len());
+        info!("Pending Tx: {}", self.mempool.len());
         for block in &self.chain {
-            println!(" Block #{}: {}", block.index, &block.hash[..16]);
+            info!("Block #{}: {}", block.index, &block.hash[..16]);
         }
     }
     pub fn get_state_snapshot(&self, height: u64) -> Option<crate::chain::snapshot::StateSnapshot> {
@@ -1203,6 +2096,14 @@ impl Clone for Blockchain {
             verified_qc_blobs: self.verified_qc_blobs.clone(),
             validator_snapshots: self.validator_snapshots.clone(),
             pending_finality_certs: self.pending_finality_certs.clone(),
+            domain_registry: self.domain_registry.clone(),
+            domain_commitment_registry: self.domain_commitment_registry.clone(),
+            bridge_state: self.bridge_state.clone(),
+            global_headers: self.global_headers.clone(),
+            plugin_registry: DomainPluginRegistry::new(),
+            message_registry: self.message_registry.clone(),
+            settlement_finality_hashes: self.settlement_finality_hashes.clone(),
+            pending_slashing_evidence: self.pending_slashing_evidence.clone(),
         }
     }
 }

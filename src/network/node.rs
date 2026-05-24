@@ -40,6 +40,7 @@ pub struct NodeClient {
     sender: mpsc::Sender<NodeCommand>,
     pub peer_id: PeerId,
     pub peer_count: Arc<AtomicUsize>,
+    sync_state: Arc<AtomicUsize>,
 }
 impl NodeClient {
     pub async fn subscribe(&self, topic: String) {
@@ -56,6 +57,42 @@ impl NodeClient {
     }
     pub async fn list_peers(&self) {
         let _ = self.sender.send(NodeCommand::ListPeers).await;
+    }
+    pub fn is_syncing(&self) -> bool {
+        self.sync_state.load(Ordering::SeqCst) == 1
+    }
+    pub fn broadcast_domain_commitment_sync(&self, commitment: crate::domain::DomainCommitment) {
+        let _ = self.sender.try_send(NodeCommand::Broadcast(
+            "blocks".into(),
+            NetworkMessage::DomainCommitment(commitment),
+        ));
+    }
+    pub fn broadcast_verified_domain_commitment_sync(
+        &self,
+        payload: crate::domain::VerifiedDomainCommitment,
+    ) {
+        let _ = self.sender.try_send(NodeCommand::Broadcast(
+            "blocks".into(),
+            NetworkMessage::VerifiedDomainCommitment(payload),
+        ));
+    }
+    pub fn broadcast_cross_domain_message_sync(
+        &self,
+        msg: crate::cross_domain::CrossDomainMessage,
+    ) {
+        let _ = self.sender.try_send(NodeCommand::Broadcast(
+            "blocks".into(),
+            NetworkMessage::CrossDomainMessage(msg),
+        ));
+    }
+    pub fn broadcast_slashing_evidence_sync(
+        &self,
+        evidence: crate::consensus::pos::SlashingEvidence,
+    ) {
+        let _ = self.sender.try_send(NodeCommand::Broadcast(
+            "blocks".into(),
+            NetworkMessage::SlashingEvidence(evidence),
+        ));
     }
 }
 #[tokio::test]
@@ -84,6 +121,7 @@ pub struct Node {
     pub peer_manager: Arc<Mutex<PeerManager>>,
     pub bootstrap_peers: Vec<String>,
     pub peer_count: Arc<AtomicUsize>,
+    pub sync_state: Arc<AtomicUsize>,
     pub in_progress_snapshots: HashMap<u64, Vec<Option<Vec<u8>>>>,
     pub max_peers: usize,
 }
@@ -154,6 +192,7 @@ impl Node {
         let (command_tx, command_rx) = mpsc::channel(32);
         let peer_manager = Arc::new(Mutex::new(PeerManager::new()));
         let peer_count = Arc::new(AtomicUsize::new(0));
+        let sync_state = Arc::new(AtomicUsize::new(0));
         Ok(Node {
             swarm,
             peer_id,
@@ -163,6 +202,7 @@ impl Node {
             peer_manager,
             bootstrap_peers: Vec::new(),
             peer_count,
+            sync_state,
             in_progress_snapshots: HashMap::new(),
             max_peers: MAX_PEERS,
         })
@@ -184,6 +224,7 @@ impl Node {
             sender: self.command_tx.clone(),
             peer_id: self.peer_id,
             peer_count: self.peer_count.clone(),
+            sync_state: self.sync_state.clone(),
         }
     }
     pub fn listen(&mut self, port: u16) -> Result<(), Box<dyn Error>> {
@@ -225,6 +266,7 @@ impl Node {
         let mut gc_interval = tokio::time::interval(Duration::from_secs(60));
         let mut discovery_interval = tokio::time::interval(Duration::from_secs(300));
         let mut finality_interval = tokio::time::interval(Duration::from_secs(30));
+        let mut slashing_gossip_interval = tokio::time::interval(Duration::from_secs(5));
         let mut dht_interval = tokio::time::interval(DHT_BOOTSTRAP_INTERVAL);
         let mut banning_interval = tokio::time::interval(Duration::from_secs(60));
         let mut last_voted_height: u64 = 0;
@@ -267,6 +309,15 @@ impl Node {
                             let topic = gossipsub::IdentTopic::new("blocks");
                             let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes());
                             last_voted_height = checkpoint_height;
+                        }
+                    }
+                }
+                _ = slashing_gossip_interval.tick() => {
+                    for evidence in self.chain.drain_slashing_evidence().await {
+                        let topic = gossipsub::IdentTopic::new("blocks");
+                        let msg = NetworkMessage::SlashingEvidence(evidence);
+                        if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, msg.to_bytes()) {
+                            warn!("Failed to gossip slashing evidence: {}", e);
                         }
                     }
                 }
@@ -367,8 +418,10 @@ impl Node {
                                         locator,
                                         limit: 2000,
                                     };
+                                    self.sync_state.store(1, Ordering::SeqCst);
                                     if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, msg.to_bytes()) {
                                         warn!("Failed to request headers: {}", e);
+                                        self.sync_state.store(0, Ordering::SeqCst);
                                     }
                                 }
                             }
@@ -470,6 +523,7 @@ impl Node {
                                                     let locator = self.chain.get_locator().await;
                                                     let req = NetworkMessage::GetHeaders { locator, limit: 500 };
                                                     let topic = gossipsub::IdentTopic::new("blocks");
+                                                    self.sync_state.store(1, Ordering::SeqCst);
                                                     let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, req.to_bytes());
                                                 }
                                             }
@@ -478,6 +532,7 @@ impl Node {
                                             let locator = self.chain.get_locator().await;
                                             let req = NetworkMessage::GetHeaders { locator, limit: 500 };
                                             let topic = gossipsub::IdentTopic::new("blocks");
+                                            self.sync_state.store(1, Ordering::SeqCst);
                                             let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, req.to_bytes());
                                         }
                                     }
@@ -501,6 +556,28 @@ impl Node {
                                                 warn!("Failed to add transaction: {}", e);
                                                 if let Ok(mut pm) = self.peer_manager.lock() {
                                                     pm.report_invalid_tx(&peer_id);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    NetworkMessage::SlashingEvidence(evidence) => {
+                                        match self.chain.submit_slashing_evidence(evidence.clone()).await {
+                                            Ok(_) => {
+                                                info!("Accepted slashing evidence from {}", peer_id);
+                                                if let Ok(mut pm) = self.peer_manager.lock() {
+                                                    pm.report_good_behavior(&peer_id);
+                                                }
+                                                let topic = gossipsub::IdentTopic::new("blocks");
+                                                let _ = self.swarm.behaviour_mut().gossipsub.publish(
+                                                    topic,
+                                                    NetworkMessage::SlashingEvidence(evidence).to_bytes(),
+                                                );
+                                            }
+                                            Err(e) => {
+                                                warn!("Rejected slashing evidence from {}: {}", peer_id, e);
+                                                if let Ok(mut pm) = self.peer_manager.lock() {
+                                                    pm.report_invalid_block(&peer_id);
                                                 }
                                             }
                                         }
@@ -612,6 +689,7 @@ impl Node {
                                             let locator = self.chain.get_locator().await;
                                             let req = NetworkMessage::GetHeaders { locator, limit: 500 };
                                             let topic = gossipsub::IdentTopic::new("blocks");
+                                            self.sync_state.store(1, Ordering::SeqCst);
                                             let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, req.to_bytes());
                                         }
                                     }
@@ -731,6 +809,17 @@ impl Node {
                                         info!("Handshake from {}: v{}.{}, chain={}, height={}, val_set={}, schemes={:?}",
                                             peer_id, version_major, version_minor, chain_id, best_height, validator_set_hash, supported_schemes);
                                         self.peer_manager.lock().unwrap_or_else(|e| { tracing::error!("PeerManager lock poisoned: {}", e); std::process::exit(1); }).set_handshaked(&peer_id, true);
+                                        let our_height = self.chain.get_height().await;
+                                        if best_height > our_height {
+                                            let locator = self.chain.get_locator().await;
+                                            let req = NetworkMessage::GetHeaders { locator, limit: 500 };
+                                            let topic = gossipsub::IdentTopic::new("blocks");
+                                            self.sync_state.store(1, Ordering::SeqCst);
+                                            if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, req.to_bytes()) {
+                                                warn!("Failed to request headers after handshake: {}", e);
+                                                self.sync_state.store(0, Ordering::SeqCst);
+                                            }
+                                        }
 
                                         let response = NetworkMessage::HandshakeAck {
                                             version_major: crate::core::encoding::PROTOCOL_VERSION_MAJOR,
@@ -761,9 +850,22 @@ impl Node {
                                         }
                                         info!("HandshakeAck from {}: v{}.{}, chain={}, height={}, val_set={}, schemes={:?}",
                                             peer_id, version_major, version_minor, chain_id, best_height, validator_set_hash, supported_schemes);
-                                        let mut pm = self.peer_manager.lock().unwrap_or_else(|e| { tracing::error!("PeerManager lock poisoned: {}", e); std::process::exit(1); });
-                                        pm.set_handshaked(&peer_id, true);
-                                        pm.report_good_behavior(&peer_id);
+                                        {
+                                            let mut pm = self.peer_manager.lock().unwrap_or_else(|e| { tracing::error!("PeerManager lock poisoned: {}", e); std::process::exit(1); });
+                                            pm.set_handshaked(&peer_id, true);
+                                            pm.report_good_behavior(&peer_id);
+                                        }
+                                        let our_height = self.chain.get_height().await;
+                                        if best_height > our_height {
+                                            let locator = self.chain.get_locator().await;
+                                            let req = NetworkMessage::GetHeaders { locator, limit: 500 };
+                                            let topic = gossipsub::IdentTopic::new("blocks");
+                                            self.sync_state.store(1, Ordering::SeqCst);
+                                            if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, req.to_bytes()) {
+                                                warn!("Failed to request headers after handshake ack: {}", e);
+                                                self.sync_state.store(0, Ordering::SeqCst);
+                                            }
+                                        }
                                     }
 
                                     NetworkMessage::Prevote { epoch, checkpoint_height, checkpoint_hash, voter_id, .. } => {
@@ -940,6 +1042,69 @@ impl Node {
                                             }
                                         }
                                     }
+                                    NetworkMessage::DomainCommitment(commitment) => {
+                                        warn!(
+                                            "Ignoring raw DomainCommitment from {} for domain {}; verified finality proof is required",
+                                            peer_id, commitment.domain_id
+                                        );
+                                        if let Ok(mut pm) = self.peer_manager.lock() {
+                                            pm.report_bad_behavior(&peer_id);
+                                        }
+                                    }
+                                    NetworkMessage::VerifiedDomainCommitment(payload) => {
+                                        info!(
+                                            "Received VerifiedDomainCommitment from {} for domain {}",
+                                            peer_id, payload.commitment.domain_id
+                                        );
+                                        let payload_clone = payload.clone();
+                                        let chain = self.chain.clone();
+                                        let swarm_cmd_tx = self.command_tx.clone();
+                                        tokio::spawn(async move {
+                                            match chain.submit_verified_domain_commitment(payload_clone.clone()).await {
+                                                Ok(_) => {
+                                                    let msg = NetworkMessage::VerifiedDomainCommitment(payload_clone);
+                                                    let _ = swarm_cmd_tx.send(NodeCommand::Broadcast("blocks".into(), msg)).await;
+                                                }
+                                                Err(e) => {
+                                                    warn!("Failed to process VerifiedDomainCommitment from {}: {}", peer_id, e);
+                                                }
+                                            }
+                                        });
+                                        if let Ok(mut pm) = self.peer_manager.lock() {
+                                            pm.report_good_behavior(&peer_id);
+                                        }
+                                    }
+                                    NetworkMessage::CrossDomainMessage(msg_obj) => {
+                                        info!("Received CrossDomainMessage from {} for bridge", peer_id);
+                                        let msg_clone = msg_obj.clone();
+                                        let chain = self.chain.clone();
+                                        let swarm_cmd_tx = self.command_tx.clone();
+                                        tokio::spawn(async move {
+                                            match chain.submit_cross_domain_message(msg_clone.clone()).await {
+                                                Ok(_) => {
+                                                    let msg = NetworkMessage::CrossDomainMessage(msg_clone);
+                                                    let _ = swarm_cmd_tx.send(NodeCommand::Broadcast("blocks".into(), msg)).await;
+                                                }
+                                                Err(e) => {
+                                                    warn!("Failed to process CrossDomainMessage from {}: {}", peer_id, e);
+                                                }
+                                            }
+                                        });
+                                        if let Ok(mut pm) = self.peer_manager.lock() {
+                                            pm.report_good_behavior(&peer_id);
+                                        }
+                                    }
+                                    NetworkMessage::GlobalHeader(header) => {
+                                        info!(
+                                            "GlobalHeader from {}: height={}, hash={}...",
+                                            peer_id,
+                                            header.global_height,
+                                            &header.calculate_hash()[..16]
+                                        );
+                                        if let Ok(mut pm) = self.peer_manager.lock() {
+                                            pm.report_good_behavior(&peer_id);
+                                        }
+                                    }
                                 }
                                 }
                                 Err(e) => {
@@ -1015,9 +1180,12 @@ impl Node {
                                                     NetworkMessage::Headers(headers) => {
                                                         if !headers.is_empty() {
                                                             let from = headers[0].index;
-                                                            let to = headers.last().unwrap().index;
-                                                            let req = NetworkMessage::GetBlocksRange { from, to };
-                                                            let _ = self.swarm.behaviour_mut().sync.send_request(&peer, req.to_bytes());
+                                                            if let Some(last) = headers.last() {
+                                                                let to = last.index;
+                                                                let req = NetworkMessage::GetBlocksRange { from, to };
+                                                                self.sync_state.store(1, Ordering::SeqCst);
+                                                                let _ = self.swarm.behaviour_mut().sync.send_request(&peer, req.to_bytes());
+                                                            }
                                                         }
                                                         self.peer_manager.lock().unwrap().report_good_behavior(&peer);
                                                     }
@@ -1045,6 +1213,7 @@ impl Node {
                                                                 }
                                                             }
                                                         }
+                                                        self.sync_state.store(0, Ordering::SeqCst);
                                                         self.peer_manager.lock().unwrap().report_good_behavior(&peer);
                                                     }
                                                     _ => {}
