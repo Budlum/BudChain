@@ -196,7 +196,7 @@ See the full [**Protocol Specification**](SPECIFICATION.md) for a detailed API r
 - [ ] **Privacy Layer**: Exploring Monero-style and Zcash-style privacy primitives.
 - [ ] **AI Execution Layer**: Investigating AI-assisted protocol automation and risk scoring.
 
----
+Budlum is built for protocol researchers and developers who like looking under the hood. We welcome technical reviews, protocol design discussions, and security feedback.
 
 ## 🤝 Join the Research
 
