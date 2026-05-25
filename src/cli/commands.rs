@@ -87,6 +87,18 @@ pub struct NodeConfig {
     pub config: Option<String>,
     #[arg(long, default_value = "9090")]
     pub metrics_port: u16,
+    #[arg(skip)]
+    pub rpc_enabled: bool,
+    #[arg(skip)]
+    pub rpc_auth_required: bool,
+    #[arg(skip)]
+    pub rpc_api_key_env: Option<String>,
+    #[arg(skip)]
+    pub rpc_allowed_ips: Vec<String>,
+    #[arg(skip)]
+    pub rpc_cors_origins: Vec<String>,
+    #[arg(skip)]
+    pub rpc_rate_limit_per_minute: Option<u64>,
     #[arg(long, default_value = "validators.json")]
     pub validators_file_cli: Option<String>,
     #[arg(long)]
@@ -118,6 +130,12 @@ impl Default for NodeConfig {
             rpc_port: 8545,
             config: None,
             metrics_port: 9090,
+            rpc_enabled: true,
+            rpc_auth_required: false,
+            rpc_api_key_env: None,
+            rpc_allowed_ips: Vec::new(),
+            rpc_cors_origins: Vec::new(),
+            rpc_rate_limit_per_minute: None,
             validators_file_cli: None,
             check_db: false,
             repair_db: false,
@@ -280,6 +298,9 @@ impl NodeConfig {
                             }
                         }
                         if let Some(rpc) = fc.rpc {
+                            if let Some(enabled) = rpc.enabled {
+                                self.rpc_enabled = enabled;
+                            }
                             if let Some(host) = rpc.host {
                                 if self.rpc_host == "127.0.0.1" || self.rpc_host.is_empty() {
                                     self.rpc_host = host;
@@ -289,6 +310,21 @@ impl NodeConfig {
                                 if self.rpc_port == 8545 {
                                     self.rpc_port = port;
                                 }
+                            }
+                            if let Some(auth_required) = rpc.auth_required {
+                                self.rpc_auth_required = auth_required;
+                            }
+                            if let Some(api_key_env) = rpc.api_key_env {
+                                self.rpc_api_key_env = Some(api_key_env);
+                            }
+                            if let Some(allowed_ips) = rpc.allowed_ips {
+                                self.rpc_allowed_ips = allowed_ips;
+                            }
+                            if let Some(cors_origins) = rpc.cors_origins {
+                                self.rpc_cors_origins = cors_origins;
+                            }
+                            if let Some(rate_limit) = rpc.rate_limit_per_minute {
+                                self.rpc_rate_limit_per_minute = Some(rate_limit);
                             }
                         }
                         if let Some(metrics) = fc.metrics {

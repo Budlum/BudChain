@@ -290,6 +290,7 @@ mod integration_tests {
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
         let mut blockchain = Blockchain::new(consensus, None, 1337, None);
         blockchain.init_genesis_account(&pubkey);
+        blockchain.state.validators.clear();
 
         let mut validator = crate::core::account::Validator::new(pubkey, 1000);
         validator.active = true;
@@ -387,6 +388,7 @@ mod integration_tests {
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
         let mut blockchain = Blockchain::new(consensus, None, 1337, None);
         blockchain.init_genesis_account(&pubkey);
+        blockchain.state.validators.clear();
 
         let mut validator = crate::core::account::Validator::new(pubkey, 2_000);
         validator.active = true;
@@ -430,6 +432,7 @@ mod integration_tests {
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
         let mut blockchain = Blockchain::new(consensus, None, 1337, None);
         blockchain.init_genesis_account(&pubkey);
+        blockchain.state.validators.clear();
 
         let mut validator = crate::core::account::Validator::new(pubkey, 2_000);
         validator.active = true;
@@ -470,6 +473,7 @@ mod integration_tests {
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
         let mut blockchain = Blockchain::new(consensus, None, 1337, None);
         blockchain.init_genesis_account(&pubkey);
+        blockchain.state.validators.clear();
 
         let mut validator = crate::core::account::Validator::new(pubkey, 2_000);
         validator.active = true;

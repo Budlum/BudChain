@@ -14,7 +14,7 @@ use budlum_core::domain::{
 };
 use budlum_core::network::node::Node;
 use budlum_core::network::protocol::NetworkMessage;
-use budlum_core::rpc::RpcServer;
+use budlum_core::rpc::{RpcSecurityConfig, RpcServer};
 use budlum_core::storage::db::Storage;
 
 use clap::Parser;
@@ -295,15 +295,32 @@ async fn main() {
         .and_then(|addr_str| Address::from_hex(addr_str).ok())
         .or(local_signer_address);
 
-    let rpc_addr = format!("{}:{}", config.rpc_host, config.rpc_port);
-    let rpc_server = RpcServer::new(chain.clone(), node.get_client());
-    tokio::spawn(async move {
-        if let Err(e) = rpc_server.run(rpc_addr.clone()).await {
-            eprintln!("RPC Server Error on {}: {}", rpc_addr, e);
-        } else {
-            println!("JSON-RPC Server running on {}", rpc_addr);
-        }
-    });
+    if config.rpc_enabled {
+        let rpc_addr = format!("{}:{}", config.rpc_host, config.rpc_port);
+        let rpc_security = match RpcSecurityConfig::from_env(
+            config.rpc_auth_required,
+            config.rpc_api_key_env.as_deref(),
+            config.rpc_allowed_ips.clone(),
+            config.rpc_cors_origins.clone(),
+            config.rpc_rate_limit_per_minute,
+        ) {
+            Ok(security) => security,
+            Err(e) => {
+                eprintln!("RPC configuration error: {}", e);
+                return;
+            }
+        };
+        let rpc_server = RpcServer::with_security(chain.clone(), node.get_client(), rpc_security);
+        tokio::spawn(async move {
+            if let Err(e) = rpc_server.run(rpc_addr.clone()).await {
+                eprintln!("RPC Server Error on {}: {}", rpc_addr, e);
+            } else {
+                println!("JSON-RPC Server running on {}", rpc_addr);
+            }
+        });
+    } else {
+        println!("JSON-RPC Server disabled by config");
+    }
 
     let metrics = budlum_core::core::metrics::Metrics::new();
     let metrics_clone = metrics.clone();

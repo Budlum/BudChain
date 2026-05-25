@@ -160,7 +160,7 @@ RPC sunucusu, asenkron bir `tokio` görevinde çalışır. **Mainnet Ready** aş
 2. **Payload Sınırı (Max Request Size):** Gelen her RPC isteği en fazla **2 MB** olabilir. Çok büyük JSON paketleri ile belleği şişirme saldırıları bu sayede engelenir.
 3. **İşlem Doğrulama (TX Validation):** `bud_sendRawTransaction` metodu, işlemi ağa yaymadan önce **transaction size** (Max 100KB) ve **kriptografik imza** kontrolü yapar. Hatalı veya devasa işlemler anında reddedilir.
 4. **Panic Prevention:** Sunucu kodundaki tüm kritik noktalar `Result` tipiyle yönetilir. Bozuk bir JSON veya ağ hatası tüm düğümü çökertemez.
-5. **Config Tabanlı Auth Hazırlığı:** TOML dosyalarında `auth_required`, `api_key_env`, `allowed_ips`, `cors_origins` ve `rate_limit_per_minute` alanları bulunur. Bunlar prod operatör konfigürasyonunu standartlaştırır; enforcement katmanı ayrıca genişletilmelidir.
+5. **Config Tabanlı Auth ve Rate Limit:** TOML dosyalarındaki `auth_required`, `api_key_env`, `allowed_ips`, `cors_origins` ve `rate_limit_per_minute` alanları RPC HTTP middleware'i tarafından uygulanır. Auth için `x-api-key` veya `Authorization: Bearer ...` header'ı kabul edilir.
 6. **ContractCall Shape Kontrolü:** `bud_txPrecheck` ve mempool doğrulaması, BudZKVM bytecode'unun boş olmamasını ve 8 byte instruction hizasına sahip olmasını kontrol eder.
 7. **Verified Settlement Zorunluluğu:** Raw domain commitment, bridge burn ve bridge unlock çağrıları RPC üzerinden reddedilir. Settlement state'i değiştiren bridge dönüş yolu commit edilmiş domain event'i ve Merkle proof ister.
 

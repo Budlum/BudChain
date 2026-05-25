@@ -4,22 +4,168 @@ use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::transaction::Transaction;
 use crate::network::node::NodeClient;
+use futures::future::BoxFuture;
+use hyper::header::{HeaderValue, AUTHORIZATION};
+use hyper::StatusCode;
+use jsonrpsee::server::{HttpBody, HttpRequest, HttpResponse};
 use jsonrpsee::types::error::ErrorObjectOwned;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+use tower::{Layer, Service, ServiceBuilder};
 use tracing::info;
+
+#[derive(Clone, Debug, Default)]
+pub struct RpcSecurityConfig {
+    pub auth_required: bool,
+    pub api_key: Option<String>,
+    pub allowed_ips: Vec<String>,
+    pub cors_origins: Vec<String>,
+    pub rate_limit_per_minute: Option<u64>,
+}
+
+impl RpcSecurityConfig {
+    pub fn from_env(
+        auth_required: bool,
+        api_key_env: Option<&str>,
+        allowed_ips: Vec<String>,
+        cors_origins: Vec<String>,
+        rate_limit_per_minute: Option<u64>,
+    ) -> Result<Self, String> {
+        let api_key = match api_key_env {
+            Some(env_name) if auth_required => Some(std::env::var(env_name).map_err(|_| {
+                format!("RPC auth is required but environment variable {env_name} is not set")
+            })?),
+            Some(env_name) => std::env::var(env_name).ok(),
+            None => None,
+        };
+
+        if auth_required && api_key.as_deref().unwrap_or_default().is_empty() {
+            return Err("RPC auth is required but no API key was configured".into());
+        }
+
+        Ok(Self {
+            auth_required,
+            api_key,
+            allowed_ips,
+            cors_origins,
+            rate_limit_per_minute,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct RpcSecurityLayer {
+    config: Arc<RpcSecurityConfig>,
+    rate_window: Arc<Mutex<VecDeque<Instant>>>,
+}
+
+impl RpcSecurityLayer {
+    fn new(config: RpcSecurityConfig) -> Self {
+        Self {
+            config: Arc::new(config),
+            rate_window: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+}
+
+impl<S> Layer<S> for RpcSecurityLayer {
+    type Service = RpcSecurityService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        RpcSecurityService {
+            inner,
+            config: self.config.clone(),
+            rate_window: self.rate_window.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RpcSecurityService<S> {
+    inner: S,
+    config: Arc<RpcSecurityConfig>,
+    rate_window: Arc<Mutex<VecDeque<Instant>>>,
+}
+
+impl<S, B> Service<HttpRequest<B>> for RpcSecurityService<S>
+where
+    S: Service<HttpRequest<B>, Response = HttpResponse> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+    S::Error: Send + 'static,
+    B: Send + 'static,
+{
+    type Response = HttpResponse;
+    type Error = S::Error;
+    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: HttpRequest<B>) -> Self::Future {
+        if !is_ip_allowed(&self.config, &req) {
+            return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
+        }
+
+        if !is_origin_allowed(&self.config, &req) {
+            return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
+        }
+
+        if !is_authorized(&self.config, &req) {
+            return Box::pin(async { Ok(text_response(StatusCode::UNAUTHORIZED, "Unauthorized")) });
+        }
+
+        if !is_rate_limited(&self.config, &self.rate_window) {
+            return Box::pin(async {
+                Ok(text_response(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "Too many requests",
+                ))
+            });
+        }
+
+        let mut inner = self.inner.clone();
+        Box::pin(async move { inner.call(req).await })
+    }
+}
 
 pub struct RpcServer {
     chain: ChainHandle,
     node: NodeClient,
+    security: RpcSecurityConfig,
 }
 
 impl RpcServer {
     pub fn new(chain: ChainHandle, node: NodeClient) -> Self {
-        Self { chain, node }
+        Self {
+            chain,
+            node,
+            security: RpcSecurityConfig::default(),
+        }
+    }
+
+    pub fn with_security(
+        chain: ChainHandle,
+        node: NodeClient,
+        security: RpcSecurityConfig,
+    ) -> Self {
+        Self {
+            chain,
+            node,
+            security,
+        }
     }
 
     pub async fn run(self, addr: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use jsonrpsee::server::ServerBuilder;
-        let server = ServerBuilder::default().build(addr.clone()).await?;
+        let http_middleware =
+            ServiceBuilder::new().layer(RpcSecurityLayer::new(self.security.clone()));
+        let server = ServerBuilder::default()
+            .set_http_middleware(http_middleware)
+            .build(addr.clone())
+            .await?;
 
         info!("RPC Server started on {}", addr);
         let handle = server.start(self.into_rpc());
@@ -135,6 +281,192 @@ impl RpcServer {
             "bridgeStateRoot": info["bridgeStateRoot"].clone(),
             "replayNonceRoot": info["replayNonceRoot"].clone(),
         })
+    }
+}
+
+fn is_authorized<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
+    if !config.auth_required {
+        return true;
+    }
+
+    let Some(expected) = config.api_key.as_deref() else {
+        return false;
+    };
+
+    let bearer = format!("Bearer {expected}");
+    let api_key = HeaderValue::from_str(expected).ok();
+    let bearer = HeaderValue::from_str(&bearer).ok();
+
+    req.headers()
+        .get("x-api-key")
+        .map(|value| Some(value) == api_key.as_ref())
+        .unwrap_or(false)
+        || req
+            .headers()
+            .get(AUTHORIZATION)
+            .map(|value| Some(value) == bearer.as_ref())
+            .unwrap_or(false)
+}
+
+fn is_ip_allowed<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
+    if config.allowed_ips.is_empty() {
+        return true;
+    }
+
+    let forwarded = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim);
+    let real_ip = req
+        .headers()
+        .get("x-real-ip")
+        .and_then(|value| value.to_str().ok());
+    let Some(ip) = forwarded.or(real_ip) else {
+        return false;
+    };
+
+    config.allowed_ips.iter().any(|allowed| allowed == ip)
+}
+
+fn is_origin_allowed<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
+    if config.cors_origins.is_empty() {
+        return true;
+    }
+
+    let Some(origin) = req
+        .headers()
+        .get("origin")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return true;
+    };
+
+    config
+        .cors_origins
+        .iter()
+        .any(|allowed| allowed == "*" || allowed == origin)
+}
+
+fn is_rate_limited(
+    config: &RpcSecurityConfig,
+    rate_window: &Arc<Mutex<VecDeque<Instant>>>,
+) -> bool {
+    let Some(limit) = config.rate_limit_per_minute else {
+        return true;
+    };
+    if limit == 0 {
+        return false;
+    }
+
+    let now = Instant::now();
+    let cutoff = now - Duration::from_secs(60);
+    let mut window = match rate_window.lock() {
+        Ok(window) => window,
+        Err(_) => return false,
+    };
+    while window.front().is_some_and(|instant| *instant < cutoff) {
+        window.pop_front();
+    }
+    if window.len() >= limit as usize {
+        return false;
+    }
+    window.push_back(now);
+    true
+}
+
+fn text_response(status: StatusCode, body: &'static str) -> HttpResponse {
+    HttpResponse::builder()
+        .status(status)
+        .header("content-type", HeaderValue::from_static("text/plain"))
+        .body(HttpBody::from(body))
+        .expect("static RPC security response is valid")
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    fn request_with_headers(headers: &[(&str, &str)]) -> HttpRequest<()> {
+        let mut builder = HttpRequest::builder().uri("/");
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        builder.body(()).unwrap()
+    }
+
+    #[test]
+    fn auth_accepts_x_api_key_and_bearer() {
+        let config = RpcSecurityConfig {
+            auth_required: true,
+            api_key: Some("secret".to_string()),
+            ..Default::default()
+        };
+
+        assert!(is_authorized(
+            &config,
+            &request_with_headers(&[("x-api-key", "secret")])
+        ));
+        assert!(is_authorized(
+            &config,
+            &request_with_headers(&[("authorization", "Bearer secret")])
+        ));
+        assert!(!is_authorized(
+            &config,
+            &request_with_headers(&[("x-api-key", "wrong")])
+        ));
+    }
+
+    #[test]
+    fn origin_and_forwarded_ip_are_enforced_when_configured() {
+        let config = RpcSecurityConfig {
+            allowed_ips: vec!["10.0.0.1".to_string()],
+            cors_origins: vec!["https://wallet.example".to_string()],
+            ..Default::default()
+        };
+
+        let allowed = request_with_headers(&[
+            ("x-forwarded-for", "10.0.0.1"),
+            ("origin", "https://wallet.example"),
+        ]);
+        let denied_ip = request_with_headers(&[
+            ("x-forwarded-for", "10.0.0.2"),
+            ("origin", "https://wallet.example"),
+        ]);
+        let denied_origin =
+            request_with_headers(&[("x-forwarded-for", "10.0.0.1"), ("origin", "https://bad")]);
+
+        assert!(is_ip_allowed(&config, &allowed));
+        assert!(is_origin_allowed(&config, &allowed));
+        assert!(!is_ip_allowed(&config, &denied_ip));
+        assert!(!is_origin_allowed(&config, &denied_origin));
+    }
+
+    #[test]
+    fn rate_limit_uses_one_minute_window() {
+        let config = RpcSecurityConfig {
+            rate_limit_per_minute: Some(2),
+            ..Default::default()
+        };
+        let window = Arc::new(Mutex::new(VecDeque::new()));
+
+        assert!(is_rate_limited(&config, &window));
+        assert!(is_rate_limited(&config, &window));
+        assert!(!is_rate_limited(&config, &window));
+    }
+
+    #[test]
+    fn required_auth_requires_env_key() {
+        let result = RpcSecurityConfig::from_env(
+            true,
+            Some("BUDLUM_TEST_MISSING_RPC_KEY"),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+
+        assert!(result.is_err());
     }
 }
 

@@ -70,7 +70,12 @@ impl StateSnapshot {
             hasher.update(key.0);
             let v = &self.validators[key];
             hasher.update(v.stake.to_le_bytes());
+            hasher.update([v.active as u8]);
+            hasher.update([v.slashed as u8]);
+            hasher.update([v.jailed as u8]);
+            hasher.update(v.jail_until.to_le_bytes());
             hasher.update(&v.bls_public_key);
+            hasher.update(&v.pop_signature);
             hasher.update(&v.pq_public_key);
         }
         hasher.update(self.finalized_height.to_le_bytes());
