@@ -9,9 +9,12 @@ use budlum_core::consensus::ConsensusEngine;
 use budlum_core::core::address::Address;
 use budlum_core::core::transaction::Transaction;
 use budlum_core::crypto::primitives::{KeyPair, ValidatorKeys};
+use budlum_core::domain::{
+    default_domain, ConsensusKind, PoADomainPlugin, PoSDomainPlugin, PoWDomainPlugin,
+};
 use budlum_core::network::node::Node;
 use budlum_core::network::protocol::NetworkMessage;
-use budlum_core::rpc::RpcServer;
+use budlum_core::rpc::{RpcSecurityConfig, RpcServer};
 use budlum_core::storage::db::Storage;
 
 use clap::Parser;
@@ -185,7 +188,40 @@ async fn main() {
 
     let pruning_manager = PruningManager::new(1000, 100, "./data/snapshots".to_string());
 
-    let mut blockchain = Blockchain::new(consensus, storage, chain_id, Some(pruning_manager));
+    let mut blockchain =
+        Blockchain::new(consensus.clone(), storage, chain_id, Some(pruning_manager));
+
+    let domain_id = 1u32;
+    let (domain_kind, adapter_name, min_conf) = match consensus_type {
+        ConsensusType::PoW => (ConsensusKind::PoW, "pow-confirmation-depth", 64u64),
+        ConsensusType::PoS => (ConsensusKind::PoS, "pos-qc-finality", 0u64),
+        ConsensusType::PoA => (ConsensusKind::PoA, "poa-authority-quorum", 0u64),
+    };
+
+    let domain_def = default_domain(
+        domain_id,
+        domain_kind.clone(),
+        chain_id,
+        adapter_name,
+        min_conf,
+    );
+    if blockchain.domain_registry.get(domain_id).is_none() {
+        if let Err(e) = blockchain.register_consensus_domain(domain_def) {
+            println!("Domain kaydi basarisiz: {}", e);
+        } else {
+            println!("Domain {} ({:?}) kaydedildi", domain_id, consensus_type);
+        }
+    }
+
+    let plugin: std::sync::Arc<dyn budlum_core::domain::ConsensusDomainPlugin> =
+        match consensus_type {
+            ConsensusType::PoW => std::sync::Arc::new(PoWDomainPlugin::new(consensus.clone())),
+            ConsensusType::PoS => std::sync::Arc::new(PoSDomainPlugin::new(consensus.clone())),
+            ConsensusType::PoA => std::sync::Arc::new(PoADomainPlugin::new(consensus.clone())),
+        };
+    if let Err(e) = blockchain.plugin_registry.register(domain_id, plugin) {
+        println!("Plugin kaydi basarisiz: {}", e);
+    }
 
     for validator in &poa_validators {
         blockchain.state.add_validator(*validator, 1);
@@ -259,15 +295,32 @@ async fn main() {
         .and_then(|addr_str| Address::from_hex(addr_str).ok())
         .or(local_signer_address);
 
-    let rpc_addr = format!("{}:{}", config.rpc_host, config.rpc_port);
-    let rpc_server = RpcServer::new(chain.clone(), node.get_client());
-    tokio::spawn(async move {
-        if let Err(e) = rpc_server.run(rpc_addr.clone()).await {
-            eprintln!("RPC Server Error on {}: {}", rpc_addr, e);
-        } else {
-            println!("JSON-RPC Server running on {}", rpc_addr);
-        }
-    });
+    if config.rpc_enabled {
+        let rpc_addr = format!("{}:{}", config.rpc_host, config.rpc_port);
+        let rpc_security = match RpcSecurityConfig::from_env(
+            config.rpc_auth_required,
+            config.rpc_api_key_env.as_deref(),
+            config.rpc_allowed_ips.clone(),
+            config.rpc_cors_origins.clone(),
+            config.rpc_rate_limit_per_minute,
+        ) {
+            Ok(security) => security,
+            Err(e) => {
+                eprintln!("RPC configuration error: {}", e);
+                return;
+            }
+        };
+        let rpc_server = RpcServer::with_security(chain.clone(), node.get_client(), rpc_security);
+        tokio::spawn(async move {
+            if let Err(e) = rpc_server.run(rpc_addr.clone()).await {
+                eprintln!("RPC Server Error on {}: {}", rpc_addr, e);
+            } else {
+                println!("JSON-RPC Server running on {}", rpc_addr);
+            }
+        });
+    } else {
+        println!("JSON-RPC Server disabled by config");
+    }
 
     let metrics = budlum_core::core::metrics::Metrics::new();
     let metrics_clone = metrics.clone();
@@ -312,6 +365,13 @@ async fn main() {
 
     tokio::select! {
         _ = node.run() => {},
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Shutdown signal received");
+            match chain.flush_storage().await {
+                Ok(bytes) => tracing::info!("Storage flushed: {} bytes", bytes),
+                Err(e) => tracing::error!("Storage flush failed during shutdown: {}", e),
+            }
+        },
         _ = async {
             let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
             let mut line = String::new();

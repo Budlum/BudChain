@@ -41,7 +41,8 @@ Bu yapı, `AccountState`'in serileştirilmiş (paketlemiş) halidir.
 
 **Hardening İyileştirmesi:**
 - **Validator Set:** Snapshot artık tüm aktif validatör setini ve stake miktarlarını içerir. Bu sayede Fast Sync ile ağa yeni katılan bir node, checkpoint imzalarını doğrulamak için genesis'ten beri gelen tüm validatör değişimlerini izlemek (replay) zorunda kalmaz.
-- **Sync Sürekliliği:** Snapshot uygulandığında, eksik kalan blok yükseklikleri için "stub block"lar oluşturularak veritabanı indeksleme bütünlüğü korunur.
+- **Snapshot Sync Güvenliği:** Snapshot'ın düğümün `chain_id` değeriyle tam uyuşması zorunludur. P2P ağ katmanında reassemble edilen snapshot'ın asenkron uygulanmasından önce `chain_id` ve çok eski olmama denetimleri (`our_height.saturating_sub(100)`) uygulanır.
+- **Rollback Koruması:** `apply_state_snapshot` fonksiyonunda, gelen snapshot'ın yüksekliğinin aktif `finalized_height` değerinden daha eski olması durumunda durumun geri yüklenmesi kesinlikle reddedilir ve durumun eski bir yüksekliğe geri çekilmesi önlenir.
 - **Finality Awareness:** Snapshot, finalized checkpoint bilgisini de taşıdığı için budama ve recovery sırasında kesinleşmiş kısmın altına inilmez.
 
 ---

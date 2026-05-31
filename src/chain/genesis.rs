@@ -1,3 +1,5 @@
+use crate::chain::finality::{ValidatorEntry, ValidatorSetSnapshot};
+use crate::core::account::AccountState;
 use crate::core::address::Address;
 use crate::core::block::{Block, DEFAULT_CHAIN_ID};
 use crate::core::chain_config::Network;
@@ -71,6 +73,7 @@ impl GenesisConfig {
 
     pub fn build_genesis_block(&self) -> Block {
         let genesis_tx = Transaction::genesis();
+        let mut genesis_state = self.build_state();
 
         let mut block = Block {
             index: 0,
@@ -83,18 +86,58 @@ impl GenesisConfig {
             signature: None,
             chain_id: self.chain_id,
             slashing_evidence: None,
-            state_root: "0".repeat(64),
+            state_root: genesis_state.calculate_state_root(),
             tx_root: "0".repeat(64),
             epoch: 0,
             slot: 0,
             vrf_output: Vec::new(),
             vrf_proof: Vec::new(),
-            validator_set_hash: "0".repeat(64),
+            validator_set_hash: self.validator_set_hash(),
         };
 
         block.tx_root = block.calculate_tx_root();
         block.hash = block.calculate_hash();
         block
+    }
+
+    pub fn build_state(&self) -> AccountState {
+        let mut state = AccountState::new();
+        state.base_fee = self.base_fee;
+        state.block_reward = self.block_reward;
+
+        for (address, amount) in &self.allocations {
+            state.add_balance(address, *amount);
+        }
+
+        let validator_stake = self.validator_stake();
+        for validator in &self.validators {
+            state.add_validator(*validator, validator_stake);
+        }
+
+        state
+    }
+
+    fn validator_stake(&self) -> u64 {
+        Network::from_chain_id(self.chain_id)
+            .map(|network| network.min_stake())
+            .unwrap_or(1)
+    }
+
+    fn validator_set_hash(&self) -> String {
+        let stake = self.validator_stake();
+        let entries = self
+            .validators
+            .iter()
+            .map(|address| ValidatorEntry {
+                address: *address,
+                stake,
+                bls_public_key: Vec::new(),
+                pop_signature: Vec::new(),
+                pq_public_key: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+
+        ValidatorSetSnapshot::compute_hash(&entries)
     }
 }
 
@@ -185,5 +228,34 @@ mod tests {
         assert_eq!(config.chain_id, 42);
         assert_eq!(config.allocations.len(), 1);
         assert_eq!(config.validators.len(), 1);
+    }
+
+    #[test]
+    fn test_genesis_state_applies_allocations_and_validators() {
+        let config = GenesisConfig::for_network(Network::Devnet);
+        let allocation = config.allocations[0];
+        let validator = config.validators[0];
+
+        let state = config.build_state();
+
+        assert_eq!(state.get_balance(&allocation.0), allocation.1);
+        assert_eq!(state.base_fee, config.base_fee);
+        assert_eq!(state.block_reward, config.block_reward);
+        assert_eq!(
+            state.get_validator(&validator).map(|v| v.stake),
+            Some(Network::Devnet.min_stake())
+        );
+    }
+
+    #[test]
+    fn test_genesis_block_commits_initial_state() {
+        let config = GenesisConfig::for_network(Network::Devnet);
+        let mut state = config.build_state();
+        let block = config.build_genesis_block();
+
+        assert_eq!(block.state_root, state.calculate_state_root());
+        assert_ne!(block.state_root, "0".repeat(64));
+        assert_ne!(block.validator_set_hash, "0".repeat(64));
+        assert_eq!(block.hash, block.calculate_hash());
     }
 }

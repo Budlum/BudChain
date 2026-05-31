@@ -92,6 +92,21 @@ Tüm metotlar `bud_` ön eki ile başlar. Bu, ağa özgü metotları standart ol
 | `bud_netVersion` | `[]` | Ağ versiyonunu (Network ID) döner. |
 | `bud_netListening` | `[]` | Düğümün dinleme durumunu döner. |
 | `bud_netPeerCount` | `[]` | Bağlı eş sayısını döner. |
+| `bud_getSettlementInfo` | `[]` | Pending global settlement root'larını ve domain commitment sayısını döner. |
+| `bud_getGlobalHeader` | `[height: u64]` | Belirli yükseklikte sealed global header döner. |
+| `bud_getDomainCommitments` | `[]` | Settlement tarafından bilinen domain commitment'ları listeler. |
+| `bud_getConsensusDomains` | `[]` | Kayıtlı consensus domainlerini listeler. |
+| `bud_registerConsensusDomain` | `[domain: object]` | Operatör, bond, adapter ve validator-set metadata içeren domain kaydı yapar. |
+| `bud_submitDomainCommitment` | `[commitment: object]` | Kapalıdır. Raw commitment reddedilir; verified submission kullanılmalıdır. |
+| `bud_submitVerifiedDomainCommitment` | `[{ commitment, proof }]` | Commitment + finality proof gönderir. Proof hash, adapter, validator-set ankrajı ve finality durumu doğrulanır. |
+| `bud_registerBridgeAsset` | `[asset_id, domain]` | Bridge-enabled kaynak domain için asset kaydı yapar. |
+| `bud_lockBridgeTransfer` | `[source_domain, target_domain, source_height, event_index, asset_id, owner, recipient, amount, expiry_height]` | Source-domain bridge lock üretir. Source/target domainler kayıtlı, aktif, bridge-enabled ve farklı olmalıdır. |
+| `bud_mintBridgeTransfer` | `[source_domain, source_height, sequence, expected_block_hash, event, proof]` | Doğrulanmış source-domain `BridgeLocked` event proof üzerinden mint yapar. |
+| `bud_burnBridgeTransfer` | `[message_id, domain]` | Kapalı raw burn path'idir. `bud_burnBridgeTransferWithEvent` kullanılmalıdır. |
+| `bud_burnBridgeTransferWithEvent` | `[message_id, domain, domain_height, event_index, expiry_height]` | Target tarafta burn yapar ve target domain tarafından commit edilmesi gereken `BridgeBurned` event'i döner. |
+| `bud_unlockBridgeTransfer` | `[message_id, source_domain]` | Kapalı raw unlock path'idir. `bud_unlockBridgeTransferVerified` kullanılmalıdır. |
+| `bud_unlockBridgeTransferVerified` | `[target_domain, target_height, sequence, expected_block_hash, event, proof]` | Commit edilmiş target-domain `BridgeBurned` event Merkle proof doğrulandıktan sonra source fonları unlock eder. |
+| `bud_sealGlobalHeader` | `[]` | Güncel deterministik settlement root'larını global header içine mühürler. |
 
 ## 3. Örnek Kullanım (curl)
 
@@ -145,8 +160,9 @@ RPC sunucusu, asenkron bir `tokio` görevinde çalışır. **Mainnet Ready** aş
 2. **Payload Sınırı (Max Request Size):** Gelen her RPC isteği en fazla **2 MB** olabilir. Çok büyük JSON paketleri ile belleği şişirme saldırıları bu sayede engelenir.
 3. **İşlem Doğrulama (TX Validation):** `bud_sendRawTransaction` metodu, işlemi ağa yaymadan önce **transaction size** (Max 100KB) ve **kriptografik imza** kontrolü yapar. Hatalı veya devasa işlemler anında reddedilir.
 4. **Panic Prevention:** Sunucu kodundaki tüm kritik noktalar `Result` tipiyle yönetilir. Bozuk bir JSON veya ağ hatası tüm düğümü çökertemez.
-5. **Config Tabanlı Auth Hazırlığı:** TOML dosyalarında `auth_required`, `api_key_env`, `allowed_ips`, `cors_origins` ve `rate_limit_per_minute` alanları bulunur. Bunlar prod operatör konfigürasyonunu standartlaştırır; enforcement katmanı ayrıca genişletilmelidir.
+5. **Config Tabanlı Auth ve Rate Limit:** TOML dosyalarındaki `auth_required`, `api_key_env`, `allowed_ips`, `cors_origins` ve `rate_limit_per_minute` alanları RPC HTTP middleware'i tarafından uygulanır. Auth için `x-api-key` veya `Authorization: Bearer ...` header'ı kabul edilir.
 6. **ContractCall Shape Kontrolü:** `bud_txPrecheck` ve mempool doğrulaması, BudZKVM bytecode'unun boş olmamasını ve 8 byte instruction hizasına sahip olmasını kontrol eder.
+7. **Verified Settlement Zorunluluğu:** Raw domain commitment, bridge burn ve bridge unlock çağrıları RPC üzerinden reddedilir. Settlement state'i değiştiren bridge dönüş yolu commit edilmiş domain event'i ve Merkle proof ister.
 
 ## 5. `bud_txPrecheck` Ne Kadar Gerçekçi?
 

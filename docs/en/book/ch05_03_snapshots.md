@@ -40,6 +40,13 @@ A safety margin keeps recent history even after finality, giving operators room 
 
 New nodes can download a recent snapshot, verify its root, and then sync only the remaining blocks. This turns multi-day bootstrap into a much shorter process.
 
+### Snapshot Sync Safety Boundaries
+
+To prevent state rollback attacks and malicious chunk injection, Budlum implements the following strict security controls during state sync:
+1. **Chain ID Verification**: Reassembled snapshots must strictly match the node's configured `chain_id`. Snapshots with mismatched chain IDs are immediately rejected before asynchronous processing.
+2. **Rollback Protection**: The snapshot height must be greater than or equal to the node's current `finalized_height`. Any attempt to apply a snapshot with a height below `finalized_height` is rejected in `apply_state_snapshot`.
+3. **Age Validation**: The P2P network layer filters and discards snapshot chunks that correspond to heights older than `our_height.saturating_sub(100)` to safeguard node bandwidth.
+
 ## Summary
 
 1.  **Disk savings:** old unnecessary data does not accumulate forever.

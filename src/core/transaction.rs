@@ -248,11 +248,16 @@ impl Transaction {
                 self.from, expected_from
             );
         }
+        self.hash = self.calculate_hash();
         let signing_hash = self.signing_hash();
         let signature = keypair.sign(&signing_hash);
         self.signature = Some(signature.to_vec());
     }
     pub fn verify(&self) -> bool {
+        if self.hash != self.calculate_hash() {
+            println!("TX hash does not match canonical transaction hash");
+            return false;
+        }
         if self.from == Address::zero() && self.to == Address::zero() && self.signature.is_none() {
             return true;
         }
@@ -373,5 +378,18 @@ mod tests {
         tx.sign(&keypair);
         assert!(tx.verify());
         assert!(tx.is_valid());
+    }
+
+    #[test]
+    fn test_verify_rejects_non_canonical_hash() {
+        let keypair = KeyPair::generate().unwrap();
+        let alice = Address::from(keypair.public_key_bytes());
+        let recipient = Address::from([1u8; 32]);
+        let mut tx = Transaction::new_with_fee(alice, recipient, 50, 1, 0, vec![]);
+        tx.sign(&keypair);
+        tx.hash = "00".repeat(32);
+
+        assert!(!tx.verify());
+        assert!(!tx.is_valid());
     }
 }
