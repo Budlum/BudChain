@@ -743,6 +743,16 @@ impl Node {
 
                                             match crate::chain::snapshot::StateSnapshot::from_bytes(&full_data) {
                                                 Ok(snapshot) => {
+                                                    let our_chain_id = self.chain.get_chain_id().await;
+                                                    if snapshot.chain_id != our_chain_id {
+                                                        warn!("Received snapshot with invalid chain_id: expected {}, got {}", our_chain_id, snapshot.chain_id);
+                                                        continue;
+                                                    }
+                                                    let our_height = self.chain.get_height().await;
+                                                    if snapshot.height < our_height.saturating_sub(100) {
+                                                        warn!("Received snapshot for too old height: {}", snapshot.height);
+                                                        continue;
+                                                    }
                                                     info!("Applying snapshot at height {}", snapshot.height);
                                                     let chain = self.chain.clone();
                                                     tokio::spawn(async move {

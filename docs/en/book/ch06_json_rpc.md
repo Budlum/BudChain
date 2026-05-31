@@ -71,7 +71,7 @@ Call `bud_getBalance` with an account public key or address.
 2.  **Max request size:** rejects oversized JSON payloads.
 3.  **Transaction validation:** `bud_sendRawTransaction` checks size and cryptographic signature before gossip.
 4.  **Panic prevention:** critical server paths use `Result` rather than crashing on malformed input.
-5.  **Config-based auth readiness:** TOML fields standardize `auth_required`, `api_key_env`, `allowed_ips`, `cors_origins`, and `rate_limit_per_minute`.
+5.  **Config-based auth and rate limiting:** TOML fields `auth_required`, `api_key_env`, `allowed_ips`, `cors_origins`, and `rate_limit_per_minute` are enforced by the RPC HTTP middleware. Auth accepts `x-api-key` or `Authorization: Bearer ...`.
 6.  **ContractCall shape checks:** precheck and mempool validation reject empty or misaligned BudZKVM bytecode.
 7.  **Verified settlement only:** raw domain commitments, bridge burns, and bridge unlocks are rejected by RPC. Settlement-changing bridge return paths require committed domain events and Merkle proofs.
 

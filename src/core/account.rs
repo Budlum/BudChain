@@ -339,6 +339,7 @@ impl AccountState {
         validator.stake = validator.stake.saturating_sub(penalty);
         validator.slashed = true;
         validator.active = false;
+        validator.jailed = true;
 
         let jail_epochs = 7;
         validator.jail_until = self.epoch_index.saturating_add(jail_epochs);
@@ -403,13 +404,11 @@ impl AccountState {
 
         self.process_unbonding();
 
-        let current_time_sec = (current_timestamp / 1000) as u64;
-
         for (addr, validator) in self.validators.iter_mut() {
-            if validator.jailed && validator.jail_until <= current_time_sec {
+            if validator.jailed && validator.jail_until <= self.epoch_index {
                 tracing::info!("Validator {} released from jail", addr);
                 validator.jailed = false;
-                if validator.stake > 0 {
+                if validator.stake > 0 && !validator.slashed {
                     validator.active = true;
                 }
             }
@@ -716,5 +715,38 @@ mod tests {
         let result = state.validate_transaction(&tx);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Fee"));
+    }
+
+    #[test]
+    fn test_slashing_sets_jail_and_releases_by_epoch() {
+        let validator = Address::from([7u8; 32]);
+        let mut state = AccountState::new();
+        state.add_validator(validator, 1_000);
+
+        let penalty = state
+            .slash_validator(
+                &validator,
+                crate::core::chain_config::FIXED_POINT_SCALE / 10,
+                "test",
+            )
+            .unwrap();
+
+        assert_eq!(penalty, 100);
+        let jailed = state.get_validator(&validator).unwrap();
+        assert!(jailed.slashed);
+        assert!(jailed.jailed);
+        assert!(!jailed.active);
+        assert_eq!(jailed.jail_until, 7);
+
+        for epoch in 1..=6 {
+            state.advance_epoch(epoch * 1_000);
+        }
+        assert!(state.get_validator(&validator).unwrap().jailed);
+
+        state.advance_epoch(7_000);
+        let released = state.get_validator(&validator).unwrap();
+        assert!(!released.jailed);
+        assert!(released.slashed);
+        assert!(!released.active);
     }
 }

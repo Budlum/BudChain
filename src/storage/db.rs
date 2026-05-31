@@ -565,37 +565,45 @@ impl Storage {
 
     pub fn repair_index(&self) -> Result<(), String> {
         tracing::info!("Starting database index repair...");
-        let last_hash_key = "LAST_BLOCK_HASH";
-        let last_hash = match self.db.get(last_hash_key) {
-            Ok(Some(h)) => String::from_utf8_lossy(&h).to_string(),
+        let last_hash = match self.get_last_hash() {
+            Ok(Some(h)) => h,
             _ => return Err("Cannot repair: No tip found in DB".into()),
         };
 
         let mut current_hash = last_hash;
         let mut count = 0;
         loop {
-            if let Ok(Some(data)) = self.db.get(format!("BLOCK:{}", current_hash)) {
-                let block: crate::core::block::Block =
-                    decode(&data).map_err(|e| format!("De-serial error during repair: {}", e))?;
-
-                let height_key = format!("BLOCK_HEIGHT:{}", block.index);
+            if let Ok(Some(block)) = self.get_block(&current_hash) {
+                let height_key = format!("HEIGHT:{}", block.index);
                 self.db
-                    .insert(height_key, block.hash.as_bytes())
+                    .insert(height_key.as_bytes(), block.hash.as_bytes())
                     .map_err(|e| e.to_string())?;
 
-                let hash_key = format!("BLOCK_HASH:{}", block.index);
+                let state_key = format!("STATE_ROOT:{}", block.index);
                 self.db
-                    .insert(hash_key, block.hash.as_bytes())
+                    .insert(state_key.as_bytes(), block.state_root.as_bytes())
                     .map_err(|e| e.to_string())?;
 
                 for tx in &block.transactions {
+                    let tx_idx_key = format!("TX_IDX:{}", tx.hash);
                     self.db
-                        .insert(format!("TX_BLOCK:{}", tx.hash), &block.index.to_le_bytes())
+                        .insert(tx_idx_key.as_bytes(), block.index.to_string().as_bytes())
                         .map_err(|e| e.to_string())?;
                 }
 
+                if block.index == 0 {
+                    self.db
+                        .insert(b"CANONICAL_HEIGHT", b"0")
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    let current_canonical = self.get_canonical_height().unwrap_or(0);
+                    if block.index > current_canonical {
+                        self.save_canonical_height(block.index).map_err(|e| e.to_string())?;
+                    }
+                }
+
                 count += 1;
-                if block.previous_hash == "0".repeat(64) {
+                if block.previous_hash == "0".repeat(64) || block.previous_hash.is_empty() {
                     break;
                 }
                 current_hash = block.previous_hash;

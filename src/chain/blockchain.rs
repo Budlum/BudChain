@@ -4,7 +4,7 @@ use crate::chain::snapshot::PruningManager;
 use crate::consensus::pos::SlashingEvidence;
 use crate::consensus::qc::{QcBlob, QcFaultProof, QcProofAction, QcProofVerdict};
 use crate::consensus::ConsensusEngine;
-use crate::core::account::AccountState;
+use crate::core::account::{AccountState, GENESIS_BALANCE};
 use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::chain_config::Network;
@@ -66,7 +66,6 @@ impl Blockchain {
     ) -> Self {
         info!("Consensus: {}", consensus.info());
         let mut chain_vec = Vec::new();
-        let mut state = AccountState::new();
 
         let mut loaded_chain = false;
         if let Some(ref store) = storage {
@@ -79,10 +78,13 @@ impl Blockchain {
             }
         }
 
+        let genesis_config = Network::from_chain_id(chain_id)
+            .map(GenesisConfig::for_network)
+            .unwrap_or_else(|| GenesisConfig::new(chain_id));
+
+        let mut state = genesis_config.build_state();
+
         if !loaded_chain {
-            let genesis_config = Network::from_chain_id(chain_id)
-                .map(GenesisConfig::for_network)
-                .unwrap_or_else(|| GenesisConfig::new(chain_id));
             let genesis = genesis_config.build_genesis_block();
             chain_vec.push(genesis);
         }
@@ -126,7 +128,7 @@ impl Blockchain {
                 warn!("Chain shorter than snapshot height, replaying from genesis");
                 0
             } else {
-                0
+                1
             }
         };
 
@@ -1627,7 +1629,10 @@ impl Blockchain {
     }
 
     pub fn init_genesis_account(&mut self, address: &Address) {
-        self.state.add_balance(address, 1_000_000_000);
+        let account = self.state.get_or_create(address);
+        if account.balance < GENESIS_BALANCE {
+            account.balance = GENESIS_BALANCE;
+        }
     }
 
     pub fn validate_and_add_block(&mut self, block: Block) -> Result<(), String> {
@@ -1923,8 +1928,16 @@ impl Blockchain {
     }
 
     fn rebuild_state(chain: &[Block]) -> Result<AccountState, String> {
-        let mut state = AccountState::new();
-        for block in chain.iter() {
+        let chain_id = chain
+            .first()
+            .map(|block| block.chain_id)
+            .unwrap_or_default();
+        let genesis_config = Network::from_chain_id(chain_id)
+            .map(GenesisConfig::for_network)
+            .unwrap_or_else(|| GenesisConfig::new(chain_id));
+        let mut state = genesis_config.build_state();
+
+        for block in chain.iter().skip(1) {
             state = Self::apply_block_effects(&state, block)
                 .map_err(|e| format!("Failed to rebuild state at block {}: {}", block.index, e))?;
         }
@@ -1944,13 +1957,20 @@ impl Blockchain {
             return None;
         }
         let block = &self.chain[height as usize];
+        let state = Self::rebuild_state(&self.chain[..=height as usize]).ok()?;
+        let finalized_height = self.finalized_height.min(height);
+        let finalized_hash = self
+            .chain
+            .get(finalized_height as usize)
+            .map(|block| block.hash.clone())
+            .unwrap_or_else(|| self.finalized_hash.clone());
         Some(crate::chain::snapshot::StateSnapshot::from_state(
             height,
             block.hash.clone(),
             self.chain_id,
-            &self.state,
-            self.finalized_height,
-            self.finalized_hash.clone(),
+            &state,
+            finalized_height,
+            finalized_hash,
         ))
     }
 
@@ -1961,25 +1981,64 @@ impl Blockchain {
         if !snapshot.verify() {
             return Err("Snapshot verification failed".into());
         }
-        self.state = AccountState::from_snapshot(&snapshot);
+        if snapshot.height < self.finalized_height {
+            return Err(format!(
+                "Snapshot height {} is older than current finalized height {}",
+                snapshot.height, self.finalized_height
+            ));
+        }
+        if snapshot.chain_id != self.chain_id {
+            return Err(format!(
+                "Snapshot chain_id mismatch: expected {}, got {}",
+                self.chain_id, snapshot.chain_id
+            ));
+        }
+        if snapshot.finalized_height > snapshot.height {
+            return Err("Snapshot finalized height exceeds snapshot height".into());
+        }
+
+        let Some(block) = self.chain.get(snapshot.height as usize) else {
+            return Err(format!(
+                "Snapshot height {} is not available in local chain",
+                snapshot.height
+            ));
+        };
+        if block.hash != snapshot.block_hash {
+            return Err(format!(
+                "Snapshot block hash mismatch at height {}",
+                snapshot.height
+            ));
+        }
+
+        let finalized_block = self
+            .chain
+            .get(snapshot.finalized_height as usize)
+            .ok_or_else(|| {
+                format!(
+                    "Snapshot finalized height {} is not available in local chain",
+                    snapshot.finalized_height
+                )
+            })?;
+        if finalized_block.hash != snapshot.finalized_hash {
+            return Err(format!(
+                "Snapshot finalized hash mismatch at height {}",
+                snapshot.finalized_height
+            ));
+        }
+
+        let mut snapshot_state = AccountState::from_snapshot(&snapshot);
+        let snapshot_state_root = snapshot_state.calculate_state_root();
+        if !block.state_root.is_empty() && snapshot_state_root != block.state_root {
+            return Err(format!(
+                "Snapshot state root mismatch: expected {}, got {}",
+                block.state_root, snapshot_state_root
+            ));
+        }
+
+        self.state = snapshot_state;
         self.finalized_height = snapshot.finalized_height;
         self.finalized_hash = snapshot.finalized_hash;
         self.mempool.set_min_fee(self.state.base_fee);
-
-        if self.chain.len() < snapshot.height as usize + 1 {
-            let mut stubs = Vec::new();
-            let start = self.chain.len();
-            for i in start..=snapshot.height as usize {
-                let mut stub = Block::new(i as u64, "stub".into(), vec![]);
-                if i == snapshot.height as usize {
-                    stub.hash = snapshot.block_hash.clone();
-                } else {
-                    stub.hash = format!("stub_{}", i);
-                }
-                stubs.push(stub);
-            }
-            self.chain.extend(stubs);
-        }
 
         Ok(())
     }
@@ -2193,6 +2252,7 @@ mod tests {
 
         let mut blockchain = Blockchain::new(engine.clone(), None, 1337, None);
 
+        blockchain.state.validators.clear();
         blockchain.state.add_validator(alice_pub, 2000);
         if let Some(v) = blockchain.state.get_validator_mut(&alice_pub) {
             v.vrf_public_key = alice_vrf_pub.clone();
@@ -2232,6 +2292,7 @@ mod tests {
 
         let fresh_engine = Arc::new(PoSEngine::new(config, Some(alice_keys)));
         let mut blockchain2 = Blockchain::new(fresh_engine, None, 1337, None);
+        blockchain2.state.validators.clear();
         blockchain2.state.add_validator(alice_pub.clone(), 2000);
         if let Some(v) = blockchain2.state.get_validator_mut(&alice_pub) {
             v.vrf_public_key = alice_vrf_pub.clone();
@@ -2393,5 +2454,69 @@ mod tests {
         let result = bc.validate_and_add_block(block);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("hash"));
+    }
+
+    #[test]
+    fn test_historical_snapshot_rebuilds_state_at_height() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let late_account = Address::from([8u8; 32]);
+        bc.state.add_balance(&late_account, 123);
+
+        let snapshot = bc.get_state_snapshot(0).unwrap();
+
+        assert_eq!(snapshot.height, 0);
+        assert_eq!(snapshot.balances.get(&late_account), None);
+        assert_eq!(snapshot.block_hash, bc.chain[0].hash);
+    }
+
+    #[test]
+    fn test_apply_snapshot_rejects_wrong_chain_id() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let snapshot = crate::chain::snapshot::StateSnapshot::from_state(
+            0,
+            bc.chain[0].hash.clone(),
+            42,
+            &bc.state,
+            0,
+            bc.chain[0].hash.clone(),
+        );
+
+        let result = bc.apply_state_snapshot(snapshot);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("chain_id"));
+    }
+
+    #[test]
+    fn test_apply_snapshot_rejects_unknown_block_hash() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let snapshot = crate::chain::snapshot::StateSnapshot::from_state(
+            0,
+            "bad_hash".to_string(),
+            1337,
+            &bc.state,
+            0,
+            bc.chain[0].hash.clone(),
+        );
+
+        let result = bc.apply_state_snapshot(snapshot);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("block hash"));
+    }
+
+    #[test]
+    fn test_apply_snapshot_accepts_local_verified_snapshot() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let snapshot = bc.get_state_snapshot(0).unwrap();
+        bc.state.add_balance(&Address::from([9u8; 32]), 500);
+
+        bc.apply_state_snapshot(snapshot).unwrap();
+
+        assert_eq!(bc.state.get_balance(&Address::from([9u8; 32])), 0);
     }
 }

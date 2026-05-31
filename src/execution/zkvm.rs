@@ -1,5 +1,7 @@
-use bud_proof::{DefaultAdapter as Prover, ProverAdapter};
+use crate::core::transaction::DEFAULT_CHAIN_ID;
+use bud_proof::{DefaultAdapter as Prover, ExecutionPublicInputs, ProverAdapter};
 use bud_vm::Vm;
+use sha3::{Digest, Keccak256};
 
 pub const DEFAULT_CONTRACT_GAS_LIMIT: u64 = 1_000_000;
 
@@ -25,23 +27,52 @@ impl ZkVmExecutor {
         let program = decode_program(bytecode)?;
         let mut vm = Vm::with_gas_limit(1024, gas_limit);
 
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            vm.run(&program);
-        }))
-        .map_err(|_| "BudZKVM execution failed".to_string())?;
+        let receipt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run(&program)))
+            .map_err(|_| "BudZKVM execution failed".to_string())?
+            .map_err(|_| "BudZKVM execution failed".to_string())?;
 
-        let proof = Prover::prove(&vm.trace, vm.trace.len());
-        if !Prover::verify(&proof, vm.trace.len()) {
-            return Err("BudZKVM proof verification failed".into());
-        }
+        let public_inputs = build_public_inputs(&program, &vm, &receipt);
+        let proof = Prover::prove(&vm.trace, &public_inputs, &program)
+            .map_err(|err| format!("BudZKVM proof generation failed: {err:?}"))?;
+        Prover::verify(&proof, &public_inputs, &program)
+            .map_err(|err| format!("BudZKVM proof verification failed: {err:?}"))?;
 
         Ok(ZkVmReceipt {
-            gas_used: vm.gas_used,
-            steps: vm.trace.len(),
-            events: vm.events,
-            proof_bytes: proof.data.len(),
+            gas_used: receipt.gas_used,
+            steps: receipt.trace_len as usize,
+            events: receipt.events,
+            proof_bytes: proof.proof_bytes.len(),
         })
     }
+}
+
+fn build_public_inputs(
+    program: &[u64],
+    vm: &Vm,
+    receipt: &bud_vm::ExecutionReceipt,
+) -> ExecutionPublicInputs {
+    ExecutionPublicInputs {
+        chain_id: DEFAULT_CHAIN_ID,
+        program_hash: hash_u64_words(program),
+        initial_state_root: [0u8; 32],
+        final_state_root: receipt.state_writes_digest,
+        sender: vm.context.sender,
+        nonce: vm.context.nonce,
+        block_height: vm.context.block_height,
+        gas_limit: vm.gas_limit,
+        gas_used: receipt.gas_used,
+        exit_code: receipt.exit_code,
+        trace_len: receipt.trace_len,
+        event_digest: hash_u64_words(&receipt.events),
+    }
+}
+
+fn hash_u64_words(words: &[u64]) -> [u8; 32] {
+    let mut hasher = Keccak256::new();
+    for word in words {
+        hasher.update(word.to_le_bytes());
+    }
+    hasher.finalize().into()
 }
 
 fn decode_program(bytecode: &[u8]) -> Result<Vec<u64>, String> {

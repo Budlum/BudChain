@@ -85,4 +85,64 @@ mod hardening_tests {
         assert_eq!(config.rpc_port, 9999);
         assert_eq!(config.metrics_port, 7070);
     }
+
+    #[test]
+    fn test_apply_snapshot_rejects_older_than_finalized() {
+        use crate::chain::blockchain::Blockchain;
+        use crate::consensus::pow::PoWEngine;
+        use std::sync::Arc;
+
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        bc.finalized_height = 10;
+
+        let snapshot = crate::chain::snapshot::StateSnapshot::from_state(
+            5,
+            "hash".to_string(),
+            1337,
+            &bc.state,
+            0,
+            "finalhash".to_string(),
+        );
+
+        let result = bc.apply_state_snapshot(snapshot);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("older than current finalized"));
+    }
+
+    #[test]
+    fn test_db_repair_index() {
+        use crate::core::block::Block;
+        use crate::storage::db::Storage;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_repair.db");
+        let storage = Storage::new(db_path.to_str().unwrap()).unwrap();
+
+        // Create a block and commit it
+        let mut block = Block::new(1, "prev_hash".to_string(), vec![]);
+        block.hash = block.calculate_hash();
+        storage.commit_block(&block, "state_root_1").unwrap();
+
+        // Verify we can read it
+        assert!(storage.get_block_by_height(1).unwrap().is_some());
+
+        // Corrupt the height index by removing it
+        let height_key = format!("HEIGHT:{}", 1);
+        storage.db().remove(height_key.as_bytes()).unwrap();
+        storage.db().flush().unwrap();
+
+        // Verify reading by height returns None now
+        assert!(storage.get_block_by_height(1).unwrap().is_none());
+
+        // Repair the index
+        storage.repair_index().unwrap();
+
+        // Verify reading by height works again
+        assert!(storage.get_block_by_height(1).unwrap().is_some());
+        assert_eq!(
+            storage.get_block_by_height(1).unwrap().unwrap().hash,
+            block.hash
+        );
+    }
 }

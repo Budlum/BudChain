@@ -87,6 +87,9 @@ An implementation of a **Byzantine-Hardened Settlement Layer** designed for netw
 - **Atomic Settlement Persistence**: Commitment insertions and domain height/hash updates are persisted in one storage batch.
 - **Domain Operator Bonds**: Domain registration requires a non-zero operator identity and a minimum bond, creating an economic hook for frozen domains.
 - **Idempotent Processing**: Identical commitments produce the same state root regardless of arrival order.
+- **Secured Hash Framing**: Prepends every field with its length prefix (64-bit LE) during multi-field hashing (`hash_fields_bytes`) to mathematically rule out framing/concatenation collisions.
+- **Rollback-Protected Snapshot Sync**: State sync verifies P2P snapshots against the node's `chain_id` and strictly rejects snapshot heights older than `finalized_height` to eliminate state rollback attacks.
+- **Durable Database Index Repair**: Fully modernized `--repair-db` module that reconstructs all index mappings (`HEIGHT:`, `TX_IDX:`, `CANONICAL_HEIGHT`, `LAST`) directly from raw block data.
 
 ### 🌉 Verified Cross-Domain Bridge
 - **Bridge-Enabled Domains Only**: Asset registration and lock operations require active, registered, bridge-enabled domains.
