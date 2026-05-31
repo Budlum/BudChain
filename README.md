@@ -3,9 +3,9 @@
 > **A controlled public-devnet candidate for Layer-1 blockchain research: modular, deterministic, and multi-consensus native.**
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/rade/budlum-core)
-[![Test Coverage](https://img.shields.io/badge/tests-263%2B-blue)](https://github.com/rade/budlum-core)
+[![Test Coverage](https://img.shields.io/badge/tests-282-blue)](https://github.com/rade/budlum-core)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Rust Version](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust Version](https://img.shields.io/badge/rust-1.94.0-orange.svg)](https://www.rust-lang.org/)
 
 ---
 
@@ -33,7 +33,7 @@ Most blockchain frameworks are optimized for a single consensus worldview. Budlu
 - 🧠 **Deterministic Execution**: Research into replay-safe state transitions and consistent global headers.
 - 🧩 **Modular Core**: Decoupled consensus, networking, and execution layers for rapid prototyping.
 - 🌐 **P2P Native**: Built on `libp2p` with GossipSub and headers-first synchronization.
-- 🛠️ **Developer First**: Fully documented JSON-RPC API and 100% test-verified core paths.
+- 🛠️ **Developer First**: Book-style technical documentation, JSON-RPC reference material, and a growing adversarial test suite.
 
 ---
 
@@ -126,7 +126,7 @@ An implementation of a **Byzantine-Hardened Settlement Layer** designed for netw
 
 Budlum Core is built with a "Test-First" engineering mindset. The architecture is validated against extreme edge cases and adversarial scenarios.
 
-- **Total Tests**: `263` (All passing ✅)
+- **Total Tests**: `282` (All passing ✅)
 - **Byzantine Chaos Matrix**: 18 specific scenarios covering network partitions, packet duplication, out-of-order delivery, and domain equivocation.
 - **Distributed Devnet Simulation**: Verified gossip convergence across a 5-node `libp2p` mesh with isolated storage.
 - **Persistence Recovery**: State and pending buffers are recovered after simulated node crashes during pending commitment cycles.
@@ -135,21 +135,34 @@ Budlum Core is built with a "Test-First" engineering mindset. The architecture i
 
 To run the full suite:
 ```bash
-nix develop --command cargo test
+nix develop --command cargo test --workspace
 ```
+
+---
+
+## 🔒 Production Hardening Status
+
+The repository now includes fail-closed Mainnet guardrails, Strict Config V2, safer genesis tooling, a versioned composite state commitment, durable canonical commit recovery, staged Snapshot V2 helpers, baseline RPC middleware, and pinned CI release gates.
+
+This is still **not Mainnet-ready**. Mainnet validator startup intentionally refuses to continue until the PKCS#11 consensus signer adapter exists. Live signed finality aggregation, separate public/operator RPC listeners, trusted-proxy enforcement, persistent P2P identity, complete Snapshot V2 restore, operational packaging, and external audit work remain open.
+
+Read the book's [**Production Hardening Status**](docs/en/book/ch12_production_hardening.md) chapter for the detailed implementation matrix and explicit blockers.
 
 ---
 
 ## ⚡ Quick Start (Local / Controlled Public Devnet)
 
 ### Requirements
-- Rust `1.70+`
+- Rust `1.94.0`
 - `protoc` (Protocol Buffers)
+- A sibling checkout of `BudZKVM`, used by local path dependencies
 
 ### Build
 ```bash
-git clone https://github.com/rade/budlum-core.git
-cd budlum-core
+mkdir budlum-workspace && cd budlum-workspace
+git clone https://github.com/Budlum/BudZKVM.git
+git clone https://github.com/rade/budlum-core.git infra
+cd infra
 cargo build --release
 ```
 
@@ -162,6 +175,16 @@ Use the following flags to test different consensus adapters:
 
 # Proof of Stake
 ./target/release/budlum-core --consensus pos --min-stake 5000 --db-path ./data/pos_node
+```
+
+Generate an explicit local devnet genesis file without printing private key material:
+
+```bash
+mkdir -p ./secrets
+./target/release/budlum-core genesis build \
+  --chain-id 1337 \
+  --dev-key-output ./secrets/devnet-allocation.key \
+  --output ./config/devnet-genesis.local.json
 ```
 
 ### 🛠️ Developer Experience (JSON-RPC)
@@ -194,8 +217,10 @@ See the full [**Protocol Specification**](SPECIFICATION.md) for a detailed API r
 - [x] **Sync Hardening**: Handshake-triggered headers-first sync and real sync status reporting.
 - [ ] **ZKVM Optimizations**: Improving STARK proof generation performance.
 - [ ] **Formal Verification**: Researching TLA+ models for settlement convergence.
-- [ ] **Mainnet Operations**: RPC rate limiting/auth, Docker/systemd packaging, health checks, and production runbooks.
-- [ ] **Security Testing**: Fuzzing, expanded property tests, clippy cleanup, and external audit preparation.
+- [x] **Baseline RPC Middleware**: API-key auth, CORS allowlists, allowed-IP filtering, and a global request-rate window.
+- [x] **Pinned CI Gates**: Rustfmt, `cargo check`, Clippy with warnings denied, workspace tests, and locked release builds.
+- [ ] **Mainnet Operations**: Separate RPC listeners, trusted proxies, health checks, Docker/systemd packaging, and production runbooks.
+- [ ] **Security Testing**: Fuzzing, expanded property tests, fault injection, restore drills, and external audit preparation.
 - [ ] **Privacy Layer**: Exploring Monero-style and Zcash-style privacy primitives.
 - [ ] **AI Execution Layer**: Investigating AI-assisted protocol automation and risk scoring.
 

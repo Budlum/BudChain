@@ -61,4 +61,15 @@ pub trait BlockchainStorage: Send + Sync {
     fn save_seen_block(&self, header: &BlockHeader, sig: &[u8]) -> std::io::Result<()>;
     fn load_all_seen_blocks(&self) -> std::io::Result<SeenBlockMap>;
     fn flush_batch(&self) -> std::io::Result<usize>;
+    fn commit_durable_batch(&self, batch: &DurableCommitBatch) -> std::io::Result<()>;
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DurableCommitBatch {
+    pub block: Block,
+    pub state_root: String,
+    pub finality_cert: Option<FinalityCert>,
+    pub global_headers: Vec<GlobalBlockHeader>,
+    pub bridge_state: Option<BridgeState>,
+    pub accounts: Vec<(Address, Account)>,
 }

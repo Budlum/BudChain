@@ -158,3 +158,10 @@ PQ enforcement ile birlikte storage katmanına küçük ama önemli iki yardımc
 - `delete_finality_cert(height)`: Belirli yükseklikteki finality sertifikasını temizler.
 
 Bu fonksiyonlar özellikle `QcFaultProof` sonrası invalidation akışında kullanılır. Böylece yalnızca RAM'deki finality durumu değil, disk üzerindeki kanıt kayıtları da tutarlı kalır.
+## Durable Canonical Commit
+
+Canonical zincir yolu artık `DurableCommitBatch` üretir. Storage önce `IN_PROGRESS_HEIGHT` marker'ını yazar ve diske flush eder; ardından blok, yükseklik ve işlem indeksleri, tip metadata, state root, opsiyonel finality sertifikası, global header'lar, bridge state ve değişen hesapları tek Sled batch içinde uygular. Marker aynı batch içinde kaldırılır.
+
+`Storage::new`, başlangıçta `recover_interrupted_commit` çağırır. Önceki süreç marker yazıldıktan sonra durmuşsa yükseklik bazlı indeksler temizlenir ve tip bir önceki bloğa geri alınır.
+
+Bu önemli bir crash-consistency adımıdır; ancak storage tasarımının tamamlandığı anlamına gelmez. Mainnet öncesi tam `ConsensusStateV2` zarfının kalıcı formatı, şema migration testleri, backup restore tatbikatları ve fault injection gerekir.

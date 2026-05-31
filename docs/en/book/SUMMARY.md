@@ -39,4 +39,4 @@
 - [Chapter 9: Directory Structure and Modularity](ch09_directory_structure.md)
 - [Chapter 10: Benchmark Results (Performance)](ch10_benchmark_results.md)
 - [Chapter 11: Multi-Consensus Settlement & Byzantine Resilience](ch11_multi_consensus_settlement.md)
-
+- [Chapter 12: Production Hardening Status](ch12_production_hardening.md)

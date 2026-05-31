@@ -57,3 +57,7 @@ Peer counts and network limits are tracked here so the node can maintain healthy
 ## 4. Maintenance and Operations
 
 Operational hardening includes periodic peer cleanup, sync health checks, request timeouts, and defensive handling of malformed messages. The node should degrade safely rather than panic on bad network input.
+
+## 5. Runtime Wiring Boundaries
+
+Config V2 parses `identity_file`, `mdns_enabled`, `max_peers`, DNS seeds, and banned-peer database paths. The current node applies the network profile's static peer cap, but not every parsed field is connected to the libp2p runtime yet. Node identity is generated ephemerally at startup and mDNS behavior is still constructed for every profile. Persistent identity loading, profile-controlled discovery, and durable ban storage remain Mainnet work.

@@ -257,6 +257,9 @@ impl KeyPair {
         println!("Keypair saved to {:?}", path.as_ref());
         Ok(())
     }
+    pub fn private_key_bytes(&self) -> [u8; SECRET_KEY_LENGTH] {
+        *self.signing_key.as_bytes()
+    }
     pub fn public_key(&self) -> VerifyingKey {
         self.signing_key.verifying_key()
     }

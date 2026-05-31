@@ -29,6 +29,7 @@ use crate::chain::chain_actor::ChainHandle;
 use crate::network::peer_manager::PeerManager;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+#[allow(clippy::large_enum_variant)]
 pub enum NodeCommand {
     Subscribe(String),
     Broadcast(String, NetworkMessage),
@@ -142,7 +143,7 @@ impl Node {
             .message_id_fn(message_id_fn)
             .max_transmit_size(crate::network::protocol::MAX_MESSAGE_SIZE)
             .build()
-            .map_err(|msg| std::io::Error::new(std::io::ErrorKind::Other, msg))?;
+            .map_err(std::io::Error::other)?;
         let gossipsub = gossipsub::Behaviour::new(
             gossipsub::MessageAuthenticity::Signed(local_key.clone()),
             gossipsub_config,
@@ -794,7 +795,7 @@ impl Node {
                                         info!("Snap-sync: {} blocks from {}", blocks.len(), peer_id);
                                         for block in blocks {
                                             let h = self.chain.get_height().await;
-                                            if block.index >= h + 1 {
+                                            if block.index > h {
                                                 match self.chain.validate_and_add_block(block.clone()).await {
                                                     Ok(_) => info!("Snap-sync applied block #{}", block.index),
                                                     Err(e) => warn!("Snap-sync block #{} failed: {}", block.index, e),
@@ -1124,21 +1125,14 @@ impl Node {
                                 }
                             }
                         }
-                        SwarmEvent::Behaviour(BudlumBehaviourEvent::Identify(event)) => {
-                            if let identify::Event::Received { info, .. } = event {
-                                info!("Received identity from {:?}", info.public_key.to_peer_id());
-                                for addr in info.listen_addrs {
-                                    self.swarm.behaviour_mut().kad.add_address(&info.public_key.to_peer_id(), addr);
-                                }
+                        SwarmEvent::Behaviour(BudlumBehaviourEvent::Identify(identify::Event::Received { info, .. })) => {
+                            info!("Received identity from {:?}", info.public_key.to_peer_id());
+                            for addr in info.listen_addrs {
+                                self.swarm.behaviour_mut().kad.add_address(&info.public_key.to_peer_id(), addr);
                             }
                         }
-                        SwarmEvent::Behaviour(BudlumBehaviourEvent::Kad(event)) => {
-                            match event {
-                                KademliaEvent::RoutingUpdated { peer, .. } => {
-                                    info!("Kademlia: Routing updated for peer {}", peer);
-                                }
-                                _ => {}
-                            }
+                        SwarmEvent::Behaviour(BudlumBehaviourEvent::Kad(KademliaEvent::RoutingUpdated { peer, .. })) => {
+                            info!("Kademlia: Routing updated for peer {}", peer);
                         }
                         SwarmEvent::Behaviour(BudlumBehaviourEvent::Sync(event)) => {
                             match event {

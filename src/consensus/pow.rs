@@ -65,7 +65,7 @@ impl PoWEngine {
             block.nonce += 1;
             block.hash = block.calculate_hash();
             iterations += 1;
-            if iterations % 100_000 == 0 {
+            if iterations.is_multiple_of(100_000) {
                 info!(
                     "Mining progress: {} iterations, nonce: {}",
                     iterations, block.nonce
@@ -86,7 +86,7 @@ impl PoWEngine {
         let first_block = &chain[chain.len() - interval];
         let actual_time = (last_block.timestamp - first_block.timestamp) / 1000;
         let expected_time = self.config.target_block_time * self.config.adjustment_interval;
-        let ratio_scaled = (expected_time as u128 * 100) / (actual_time.max(1) as u128);
+        let ratio_scaled = (expected_time as u128 * 100) / actual_time.max(1);
         let new_diff = (self.get_difficulty() * ratio_scaled as usize) / 100;
         new_diff.clamp(1, 32)
     }
@@ -129,7 +129,7 @@ impl ConsensusEngine for PoWEngine {
             )));
         }
 
-        if block.index > 0 && block.index % self.config.adjustment_interval == 0 {
+        if block.index > 0 && block.index.is_multiple_of(self.config.adjustment_interval) {
             let new_diff = self.calculate_new_difficulty(chain);
             if let Ok(mut d) = self.current_difficulty.write() {
                 *d = new_diff;

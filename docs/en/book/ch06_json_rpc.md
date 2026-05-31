@@ -8,11 +8,11 @@ The RPC server is configured through TOML and exposes Budlum-specific methods wi
 
 ### Configuration File
 
-Typical configuration includes bind address, port, connection limits, request size limits, optional auth settings, CORS origins, and rate limits.
+Typical configuration includes bind address, optional auth settings, CORS origins, allowed IPs, and a global request-rate window.
 
 ## 2. Observability: Prometheus Metrics
 
-Budlum exposes operational metrics for Prometheus and Grafana. Metrics cover block height, peer counts, mempool size, RPC activity, and validation behavior.
+Budlum exposes a Prometheus text-format endpoint. Metric descriptors exist for chain, storage, settlement, P2P, and mempool behavior. Most live collectors are not wired yet, and the metrics server currently binds `0.0.0.0:{metrics_port}` independently of the parsed listener string.
 
 ## 3. Supported Methods (`bud_` Prefix)
 
@@ -67,14 +67,15 @@ Call `bud_getBalance` with an account public key or address.
 
 ## 5. Architecture and Security
 
-1.  **Max connections:** limits active clients and prevents resource exhaustion.
-2.  **Max request size:** rejects oversized JSON payloads.
-3.  **Transaction validation:** `bud_sendRawTransaction` checks size and cryptographic signature before gossip.
-4.  **Panic prevention:** critical server paths use `Result` rather than crashing on malformed input.
-5.  **Config-based auth and rate limiting:** TOML fields `auth_required`, `api_key_env`, `allowed_ips`, `cors_origins`, and `rate_limit_per_minute` are enforced by the RPC HTTP middleware. Auth accepts `x-api-key` or `Authorization: Bearer ...`.
-6.  **ContractCall shape checks:** precheck and mempool validation reject empty or misaligned BudZKVM bytecode.
-7.  **Verified settlement only:** raw domain commitments, bridge burns, and bridge unlocks are rejected by RPC. Settlement-changing bridge return paths require committed domain events and Merkle proofs.
+1.  **Transaction validation:** `bud_sendRawTransaction` checks size and cryptographic signature before gossip.
+2.  **Config-based auth and rate limiting:** TOML fields `auth_required`, `api_key_env`, `allowed_ips`, `cors_origins`, and `rate_limit_per_minute` are enforced by the RPC HTTP middleware. Auth accepts `x-api-key` or `Authorization: Bearer ...`.
+3.  **ContractCall shape checks:** precheck and mempool validation reject empty or misaligned BudZKVM bytecode.
+4.  **Verified settlement only:** raw domain commitments, bridge burns, and bridge unlocks are rejected by RPC. Settlement-changing bridge return paths require committed domain events and Merkle proofs.
 
-## 6. How Realistic Is `bud_txPrecheck`?
+## 6. Mainnet Boundaries
+
+Config V2 parses `public_listener`, `operator_listener`, and `trusted_proxies`, but runtime currently starts one HTTP RPC listener. Allowed-IP matching trusts `x-forwarded-for` or `x-real-ip` directly, so it must not be exposed behind arbitrary proxies. Separate public/operator servers, trusted-proxy enforcement, per-client quotas, health endpoints, and explicit connection/body limits remain Mainnet work.
+
+## 7. How Realistic Is `bud_txPrecheck`?
 
 `bud_txPrecheck` is a fast early warning system. It does not replace full block execution, but it helps wallets and operators catch malformed transactions before broadcasting them.

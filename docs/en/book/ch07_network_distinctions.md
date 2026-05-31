@@ -1,37 +1,29 @@
-# Chapter 7: Network Distinctions
+# Chapter 7: Network Distinctions and Strict Config V2
 
-Budlum separates Mainnet, Testnet, and Devnet so data, peers, chain IDs, ports, genesis files, and operational expectations do not mix.
+Budlum separates Mainnet, Testnet, and Devnet so chain identity, peers, genesis files, keys, and operational expectations cannot mix accidentally.
 
-## 1. Network Types
+## 1. Built-In Profiles
 
--   **Mainnet:** production network with real economic value and strict security expectations.
--   **Testnet:** public testing network with separate chain ID and test funds.
--   **Devnet:** local or development network optimized for fast iteration.
+| Network | Chain ID | Default P2P Port | Default Role |
+| --- | ---: | ---: | --- |
+| Mainnet | `1` | `4001` | deployment-defined |
+| Testnet | `42` | `5001` | deployment-defined |
+| Devnet | `1337` | `6001` | local development |
 
-## 2. Selecting a Network with the CLI
+Built-in bootnode and DNS-seed arrays are intentionally empty. Release operators must populate signed deployment configuration rather than rely on placeholder addresses.
 
-Examples:
+## 2. Strict Config V2
 
-```bash
-# Start in devnet mode, the default
-budlum node --network devnet
+The repository includes `config/devnet.toml`, `config/testnet.toml`, and `config/mainnet.toml`. V2 uses typed sections: `network`, `node`, `storage`, `p2p`, `rpc`, `metrics`, `validator`, and `features`. Unknown fields are rejected. File values load first, environment overrides apply second, and strict runtime validation runs even without a config file.
 
-# Start in testnet mode
-budlum node --network testnet
+Supported roles are `validator`, `sentry`, `seed`, `rpc`, and `archive`. Validator, sentry, and seed roles disable public RPC startup.
 
-# Start with a TOML config file
-budlum node --config config/testnet.toml
-```
+## 3. Fail-Closed Rules
 
-## 3. Configuration Logic
+-   A configured chain ID must match the selected network profile.
+-   Stored genesis identity must match the selected chain when an existing database is opened.
+-   Mainnet requires explicit genesis and seed/bootnode configuration and rejects mDNS.
+-   Mainnet v1 rejects governance, BudZKVM contracts, and pruning.
+-   Mainnet validator startup requires PKCS#11 configuration and intentionally stops because the consensus signer adapter is not wired yet.
 
-`src/core/chain_config.rs` centralizes chain ID, ports, consensus settings, gas values, mempool limits, and security values.
-
-## 4. Config Files
-
-`config/devnet.toml`, `config/testnet.toml`, and `config/mainnet.toml` carry operator-facing values such as bind addresses, bootnodes, database paths, and RPC settings.
-
-## 5. Security and Isolation
-
-Network isolation prevents replay attacks, accidental peer mixing, and corrupted local databases. Operators should keep data directories and keys separate per network.
-
+These rules are guardrails, not a declaration that Mainnet launch is ready. See [Chapter 12](ch12_production_hardening.md).

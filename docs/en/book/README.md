@@ -10,9 +10,9 @@ The codebase is written in **Rust** and uses modern technologies:
 -   **Cryptography:** Ed25519 and BLS for finality, Merkle Patricia Trie for account state
 -   **Networking:** Libp2p with Request-Response Sync, Gossipsub, and Kademlia DHT
 -   **Database:** Sled, an embedded key-value store
--   **Consensus:** Pluggable PoW, PoS, and automatic finality voting
--   **Observability:** Prometheus metrics, compatible with Grafana
--   **Administration:** A flexible TOML-based configuration system
+-   **Consensus:** Pluggable PoW, PoS, and a staged BLS/PQ finality subsystem
+-   **Observability:** Prometheus-format metrics endpoint with runtime wiring still in progress
+-   **Administration:** Strict TOML Config V2 with role and Mainnet guardrails
 
 ---
 
@@ -64,6 +64,9 @@ The new **Layered Modular Architecture** and file layout.
 ### 11. [Chapter 11: Multi-Consensus Settlement & Byzantine Resilience](ch11_multi_consensus_settlement.md)
 **Model B: Buffered Registry** architecture, network partition recovery, and deterministic global consensus proofs under Byzantine conditions.
 
+### 12. [Chapter 12: Production Hardening Status](ch12_production_hardening.md)
+The source-of-truth status page for implemented protections, staged work, and explicit Mainnet blockers.
+
 ---
 
 ## Contributing
@@ -72,4 +75,3 @@ Budlum is an open-source project. You can find the code under `infra/src` and co
 
 Enjoy the read,
 *The Budlum Core Team*
-

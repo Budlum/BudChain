@@ -1,42 +1,48 @@
 [network]
-name = "mainnet"
+profile = "mainnet"
 chain_id = 1
-port = 4001
+genesis_file = "./config/mainnet-genesis.json"
 
-[consensus]
-type = "pos"
-min_stake = 1000000
-epoch_len = 100
-
-[bootnodes]
-addresses = []
-fallback = []
-dns_seeds = []
-
-[rpc]
-enabled = true
-host = "0.0.0.0"
-port = 8545
-auth_required = true
-api_key_env = "BUDLUM_RPC_API_KEY"
-allowed_ips = []
-cors_origins = []
-rate_limit_per_minute = 300
-
-[metrics]
-port = 9090
+[node]
+role = "validator"
 
 [storage]
-db_path = "./data/mainnet/budlum.db"
+data_dir = "./data/mainnet/budlum.db"
 snapshot_dir = "./data/mainnet/snapshots"
-backups_enabled = true
 backup_dir = "./data/mainnet/backups"
+backups_enabled = true
 
-[validator]
-key_file = "./secrets/mainnet-validator.key"
-backend = "hsm"
-
-[security]
+[p2p]
+identity_file = "./secrets/mainnet-node-id.key"
+# Populate during the signed Mainnet release ceremony.
+bootnodes = []
+dns_seeds = []
 max_peers = 100
 banned_peer_db = "./data/mainnet/banned-peers.json"
 mdns_enabled = false
+
+[rpc]
+public_listener = "0.0.0.0:8545"
+operator_listener = "127.0.0.1:8546"
+trusted_proxies = []
+enabled = true
+
+[metrics]
+listener = "0.0.0.0:9090"
+
+[validator]
+backend = "pkcs11"
+
+[validator.signer]
+backend = "pkcs11"
+
+# Add a deployment-specific PKCS#11 section outside source control:
+# [validator.signer.pkcs11]
+# module_path = "/path/to/vendor-pkcs11.so"
+# slot_id = 0
+# token_pin_env = "BUDLUM_PKCS11_TOKEN_PIN"
+
+[features]
+governance = false
+zkvm_contracts = false
+pruning = false

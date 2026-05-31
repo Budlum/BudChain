@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod rpc_tests {
     use crate::chain::blockchain::Blockchain;
     use crate::chain::chain_actor::{ChainActor, ChainHandle};
     use crate::consensus::pow::PoWEngine;
@@ -87,7 +87,7 @@ mod tests {
         bc.add_balance(&from, 1000).await;
 
         let bob = Address::from_hex(&"02".repeat(32)).unwrap();
-        let mut tx = Transaction::new(from.clone(), bob, 100, vec![]);
+        let mut tx = Transaction::new(from, bob, 100, vec![]);
         tx.fee = 1;
         tx.sign(&keypair);
         let hex_tx_hash = format!("0x{}", tx.hash);
@@ -146,7 +146,7 @@ mod tests {
         let from = Address::from(keypair.public_key_bytes());
 
         let bob = Address::from_hex(&"02".repeat(32)).unwrap();
-        let mut tx = Transaction::new(from.clone(), bob, 100, vec![]);
+        let mut tx = Transaction::new(from, bob, 100, vec![]);
         tx.fee = 1;
         let precheck = server.tx_precheck(tx.clone()).await.unwrap();
         println!(

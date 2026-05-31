@@ -6,7 +6,7 @@ use crate::cross_domain::message::CrossDomainMessage;
 use crate::cross_domain::BridgeState;
 use crate::domain::{ConsensusDomain, DomainCommitment};
 use crate::settlement::GlobalBlockHeader;
-use crate::storage::traits::{BlockchainStorage, SeenBlockMap};
+use crate::storage::traits::{BlockchainStorage, DurableCommitBatch, SeenBlockMap};
 use serde::{de::DeserializeOwned, Serialize};
 use sled::Db;
 use std::str::from_utf8;
@@ -32,6 +32,7 @@ impl Storage {
         let db = sled::open(path)?;
         let storage = Storage { db };
         storage.apply_migrations()?;
+        storage.recover_interrupted_commit()?;
         Ok(storage)
     }
 
@@ -105,6 +106,147 @@ impl Storage {
         self.db.flush()?;
         Ok(())
     }
+
+    pub fn recover_interrupted_commit(&self) -> std::io::Result<()> {
+        if let Some(height_bytes) = self.db.get(b"IN_PROGRESS_HEIGHT")? {
+            let height_str = from_utf8(&height_bytes)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            let height: u64 = height_str.parse().unwrap_or(0);
+            tracing::warn!(
+                "Interrupted commit detected at height {}. Initiating rollback...",
+                height
+            );
+
+            let mut batch = sled::Batch::default();
+
+            // 1. If we wrote block H, clean up transaction indices and the block itself
+            if let Some(block) = self.get_block_by_height(height)? {
+                for tx in &block.transactions {
+                    let tx_idx_key = format!("TX_IDX:{}", tx.hash);
+                    batch.remove(tx_idx_key.as_bytes());
+                }
+                batch.remove(block.hash.as_bytes());
+            }
+
+            // 2. Remove block indexes at height H
+            let height_key = format!("HEIGHT:{}", height);
+            batch.remove(height_key.as_bytes());
+            batch.remove(format!("STATE_ROOT:{}", height).as_bytes());
+            batch.remove(format!("FINALITY_CERT:{}", height).as_bytes());
+            batch.remove(format!("QC_BLOB:{}", height).as_bytes());
+
+            // 3. Revert CANONICAL_HEIGHT and LAST hash to H-1
+            if height > 0 {
+                let prev_height = height - 1;
+                let prev_height_key = format!("HEIGHT:{}", prev_height);
+                if let Some(prev_hash_bytes) = self.db.get(prev_height_key.as_bytes())? {
+                    batch.insert(b"LAST", &prev_hash_bytes);
+                } else {
+                    batch.remove(b"LAST");
+                }
+                batch.insert(b"CANONICAL_HEIGHT", prev_height.to_string().as_bytes());
+            } else {
+                batch.remove(b"LAST");
+                batch.remove(b"CANONICAL_HEIGHT");
+            }
+
+            // 4. Remove the IN_PROGRESS_HEIGHT marker
+            batch.remove(b"IN_PROGRESS_HEIGHT");
+
+            // Apply rollback batch atomically
+            self.db.apply_batch(batch)?;
+            self.db.flush()?;
+            tracing::info!("Rollback for height {} completed successfully.", height);
+        }
+        Ok(())
+    }
+
+    pub fn commit_durable_batch(&self, batch: &DurableCommitBatch) -> std::io::Result<()> {
+        // Write IN_PROGRESS_HEIGHT marker and flush it
+        self.db.insert(
+            b"IN_PROGRESS_HEIGHT",
+            batch.block.index.to_string().as_bytes(),
+        )?;
+        self.db.flush()?;
+
+        let mut b = sled::Batch::default();
+
+        // 1. Block
+        let block_bytes = encode(&batch.block)?;
+        b.insert(batch.block.hash.as_bytes(), block_bytes.as_slice());
+
+        // 2. Height mapping
+        let height_key = format!("HEIGHT:{}", batch.block.index);
+        b.insert(height_key.as_bytes(), batch.block.hash.as_bytes());
+
+        // 3. LAST tip hash
+        b.insert(b"LAST", batch.block.hash.as_bytes());
+
+        // 4. State root
+        let state_key = format!("STATE_ROOT:{}", batch.block.index);
+        b.insert(state_key.as_bytes(), batch.state_root.as_bytes());
+
+        // 5. Canonical height
+        b.insert(
+            b"CANONICAL_HEIGHT",
+            batch.block.index.to_string().as_bytes(),
+        );
+
+        // 6. Transaction indexes
+        for tx in &batch.block.transactions {
+            let tx_idx_key = format!("TX_IDX:{}", tx.hash);
+            b.insert(
+                tx_idx_key.as_bytes(),
+                batch.block.index.to_string().as_bytes(),
+            );
+        }
+
+        // 7. Finality Certificate
+        if let Some(ref cert) = batch.finality_cert {
+            let cert_key = format!("FINALITY_CERT:{}", batch.block.index);
+            let cert_val = encode(cert)?;
+            b.insert(cert_key.as_bytes(), cert_val.as_slice());
+        }
+
+        // 8. Global headers
+        for header in &batch.global_headers {
+            let key = format!("GLOBAL_HEADER:{}", header.global_height);
+            let hash_key = format!("GLOBAL_HEADER_HASH:{}", header.calculate_hash());
+            let val = encode(header)?;
+            b.insert(key.as_bytes(), val.as_slice());
+            b.insert(
+                hash_key.as_bytes(),
+                header.global_height.to_string().as_bytes(),
+            );
+            b.insert(
+                b"LAST_GLOBAL_HEIGHT",
+                header.global_height.to_string().as_bytes(),
+            );
+        }
+
+        // 9. Bridge state
+        if let Some(ref bridge_state) = batch.bridge_state {
+            let val = encode(bridge_state)?;
+            b.insert(b"BRIDGE_STATE", val.as_slice());
+        }
+
+        // 10. Accounts
+        for (pubkey, account) in &batch.accounts {
+            let key = format!("ACCT:{}", pubkey);
+            let val = encode(account)?;
+            b.insert(key.as_bytes(), val.as_slice());
+        }
+
+        // 11. Remove IN_PROGRESS_HEIGHT marker
+        b.remove(b"IN_PROGRESS_HEIGHT");
+
+        // Apply batch atomically and flush
+        self.db.apply_batch(b)?;
+        self.db.flush()?;
+
+        Ok(())
+    }
+
     pub fn get_block(&self, hash: &str) -> std::io::Result<Option<Block>> {
         if let Some(val) = self.db.get(hash)? {
             let block: Block = decode(&val)?;
@@ -572,44 +714,41 @@ impl Storage {
 
         let mut current_hash = last_hash;
         let mut count = 0;
-        loop {
-            if let Ok(Some(block)) = self.get_block(&current_hash) {
-                let height_key = format!("HEIGHT:{}", block.index);
+        while let Ok(Some(block)) = self.get_block(&current_hash) {
+            let height_key = format!("HEIGHT:{}", block.index);
+            self.db
+                .insert(height_key.as_bytes(), block.hash.as_bytes())
+                .map_err(|e| e.to_string())?;
+
+            let state_key = format!("STATE_ROOT:{}", block.index);
+            self.db
+                .insert(state_key.as_bytes(), block.state_root.as_bytes())
+                .map_err(|e| e.to_string())?;
+
+            for tx in &block.transactions {
+                let tx_idx_key = format!("TX_IDX:{}", tx.hash);
                 self.db
-                    .insert(height_key.as_bytes(), block.hash.as_bytes())
+                    .insert(tx_idx_key.as_bytes(), block.index.to_string().as_bytes())
                     .map_err(|e| e.to_string())?;
+            }
 
-                let state_key = format!("STATE_ROOT:{}", block.index);
+            if block.index == 0 {
                 self.db
-                    .insert(state_key.as_bytes(), block.state_root.as_bytes())
+                    .insert(b"CANONICAL_HEIGHT", b"0")
                     .map_err(|e| e.to_string())?;
-
-                for tx in &block.transactions {
-                    let tx_idx_key = format!("TX_IDX:{}", tx.hash);
-                    self.db
-                        .insert(tx_idx_key.as_bytes(), block.index.to_string().as_bytes())
-                        .map_err(|e| e.to_string())?;
-                }
-
-                if block.index == 0 {
-                    self.db
-                        .insert(b"CANONICAL_HEIGHT", b"0")
-                        .map_err(|e| e.to_string())?;
-                } else {
-                    let current_canonical = self.get_canonical_height().unwrap_or(0);
-                    if block.index > current_canonical {
-                        self.save_canonical_height(block.index).map_err(|e| e.to_string())?;
-                    }
-                }
-
-                count += 1;
-                if block.previous_hash == "0".repeat(64) || block.previous_hash.is_empty() {
-                    break;
-                }
-                current_hash = block.previous_hash;
             } else {
+                let current_canonical = self.get_canonical_height().unwrap_or(0);
+                if block.index > current_canonical {
+                    self.save_canonical_height(block.index)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+
+            count += 1;
+            if block.previous_hash == "0".repeat(64) || block.previous_hash.is_empty() {
                 break;
             }
+            current_hash = block.previous_hash;
         }
         tracing::info!("Repair complete. Re-indexed {} blocks", count);
         Ok(())
@@ -809,5 +948,82 @@ impl BlockchainStorage for Storage {
 
     fn flush_batch(&self) -> std::io::Result<usize> {
         Storage::flush_batch(self)
+    }
+
+    fn commit_durable_batch(&self, batch: &DurableCommitBatch) -> std::io::Result<()> {
+        Storage::commit_durable_batch(self, batch)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::account::Account;
+    use crate::core::address::Address;
+    use crate::core::block::Block;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_durable_commit_batch_and_recovery() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        // 1. Create a storage instance
+        let storage = Storage::new(path).unwrap();
+
+        // 2. Form a block and some accounts
+        let mut block = Block::new(1, "0".repeat(64), vec![]);
+        block.hash = block.calculate_hash();
+
+        let addr = Address::from_hex(&"01".repeat(32)).unwrap();
+        let account = Account::with_balance(addr, 500);
+
+        let batch = DurableCommitBatch {
+            block: block.clone(),
+            state_root: "dummy_state_root".to_string(),
+            finality_cert: None,
+            global_headers: vec![],
+            bridge_state: None,
+            accounts: vec![(addr, account)],
+        };
+
+        // 3. Commit it!
+        storage.commit_durable_batch(&batch).unwrap();
+
+        // 4. Verify successfully written
+        let loaded_block = storage.get_block_by_height(1).unwrap().unwrap();
+        assert_eq!(loaded_block.hash, block.hash);
+
+        let accounts = storage.load_all_accounts().unwrap();
+        assert_eq!(accounts.get(&addr).unwrap().balance, 500);
+
+        // 5. Simulate an interrupted commit at height 2
+        storage.db.insert(b"IN_PROGRESS_HEIGHT", b"2").unwrap();
+        let mut block2 = Block::new(2, block.hash.clone(), vec![]);
+        block2.hash = block2.calculate_hash();
+        storage
+            .db
+            .insert(block2.hash.as_bytes(), encode(&block2).unwrap())
+            .unwrap();
+        storage
+            .db
+            .insert(b"HEIGHT:2", block2.hash.as_bytes())
+            .unwrap();
+        storage.db.insert(b"STATE_ROOT:2", b"half_state").unwrap();
+        storage.db.insert(b"LAST", block2.hash.as_bytes()).unwrap();
+        storage.db.insert(b"CANONICAL_HEIGHT", b"2").unwrap();
+        storage.db.flush().unwrap();
+
+        // Drop the first storage handle to release the file lock
+        drop(storage);
+
+        // 6. Instantiate a new storage on the same path, which triggers recovery
+        let storage2 = Storage::new(path).unwrap();
+
+        // 7. Verify recovery successfully rolled back height 2 and restored tip to height 1
+        assert!(storage2.db.get(b"IN_PROGRESS_HEIGHT").unwrap().is_none());
+        assert!(storage2.get_block_by_height(2).unwrap().is_none());
+        assert_eq!(storage2.get_canonical_height().unwrap(), 1);
+        assert_eq!(storage2.get_last_hash().unwrap().unwrap(), block.hash);
     }
 }

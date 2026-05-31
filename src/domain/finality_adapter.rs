@@ -213,8 +213,7 @@ impl DomainFinalityAdapter for PoAFinalityAdapter {
             ));
         }
 
-        let required = (*validator_count * self.quorum_numerator + self.quorum_denominator - 1)
-            / self.quorum_denominator;
+        let required = (*validator_count * self.quorum_numerator).div_ceil(self.quorum_denominator);
 
         if *signer_count >= required {
             Ok(FinalityStatus::Finalized)

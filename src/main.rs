@@ -31,6 +31,171 @@ fn load_signing_key(path: &str) -> Option<KeyPair> {
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 3 && args[1] == "genesis" && args[2] == "build" {
+        let mut output_path = "./genesis.json".to_string();
+        let mut chain_id = 1337u64;
+        let mut validators = Vec::new();
+        let mut allocations = Vec::new();
+        let mut block_reward = 50u64;
+        let mut base_fee = 1u64;
+        let mut dev_key_output = None;
+
+        let mut i = 3;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--output" | "-o" => {
+                    if i + 1 < args.len() {
+                        output_path = args[i + 1].clone();
+                        i += 2;
+                    } else {
+                        eprintln!("Error: Missing value for --output");
+                        std::process::exit(1);
+                    }
+                }
+                "--chain-id" | "-c" => {
+                    if i + 1 < args.len() {
+                        chain_id = args[i + 1].parse().expect("Invalid chain-id");
+                        i += 2;
+                    } else {
+                        eprintln!("Error: Missing value for --chain-id");
+                        std::process::exit(1);
+                    }
+                }
+                "--validators" | "-v" => {
+                    if i + 1 < args.len() {
+                        let addrs = &args[i + 1];
+                        for addr_str in addrs.split(',') {
+                            if let Ok(addr) = Address::from_hex(addr_str.trim()) {
+                                validators.push(addr);
+                            } else {
+                                eprintln!("Error: Invalid validator address '{}'", addr_str);
+                                std::process::exit(1);
+                            }
+                        }
+                        i += 2;
+                    } else {
+                        eprintln!("Error: Missing value for --validators");
+                        std::process::exit(1);
+                    }
+                }
+                "--allocations" | "-a" => {
+                    if i + 1 < args.len() {
+                        let allocs_str = &args[i + 1];
+                        for item in allocs_str.split(',') {
+                            let parts: Vec<&str> = item.split(':').collect();
+                            if parts.len() == 2 {
+                                let addr = Address::from_hex(parts[0].trim())
+                                    .expect("Invalid allocation address");
+                                let amount: u64 =
+                                    parts[1].trim().parse().expect("Invalid allocation amount");
+                                allocations.push((addr, amount));
+                            } else {
+                                eprintln!("Error: Invalid allocation format '{}' (expected address:amount)", item);
+                                std::process::exit(1);
+                            }
+                        }
+                        i += 2;
+                    } else {
+                        eprintln!("Error: Missing value for --allocations");
+                        std::process::exit(1);
+                    }
+                }
+                "--block-reward" => {
+                    if i + 1 < args.len() {
+                        block_reward = args[i + 1].parse().expect("Invalid block-reward");
+                        i += 2;
+                    } else {
+                        eprintln!("Error: Missing value for --block-reward");
+                        std::process::exit(1);
+                    }
+                }
+                "--base-fee" => {
+                    if i + 1 < args.len() {
+                        base_fee = args[i + 1].parse().expect("Invalid base-fee");
+                        i += 2;
+                    } else {
+                        eprintln!("Error: Missing value for --base-fee");
+                        std::process::exit(1);
+                    }
+                }
+                "--dev-key-output" => {
+                    if i + 1 < args.len() {
+                        dev_key_output = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        eprintln!("Error: Missing value for --dev-key-output");
+                        std::process::exit(1);
+                    }
+                }
+                other => {
+                    eprintln!("Unknown argument: {}", other);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        // Dev convenience path: never print generated private key material.
+        if allocations.is_empty() {
+            if chain_id
+                != budlum_core::core::chain_config::Network::Devnet
+                    .chain_id()
+                    .value()
+            {
+                eprintln!(
+                    "Error: automatic allocation key generation is only allowed for the devnet chain ID"
+                );
+                std::process::exit(1);
+            }
+            let key_output = dev_key_output.unwrap_or_else(|| {
+                eprintln!(
+                    "Error: --allocations is required unless --dev-key-output is provided for a generated dev key"
+                );
+                std::process::exit(1);
+            });
+            let dev_key = KeyPair::generate().unwrap();
+            let dev_addr = Address::from(dev_key.public_key_bytes());
+            dev_key
+                .save(&key_output)
+                .expect("Failed to save generated dev key");
+            allocations.push((dev_addr, 1_000_000_000));
+            validators.push(dev_addr);
+            println!("No allocations/validators provided. Generated default devnet keypair:");
+            println!("Address: {}", dev_addr);
+            println!("Private key saved to: {}", key_output);
+        }
+        if chain_id
+            != budlum_core::core::chain_config::Network::Devnet
+                .chain_id()
+                .value()
+            && validators.is_empty()
+        {
+            eprintln!("Error: non-devnet genesis files require an explicit --validators list");
+            std::process::exit(1);
+        }
+
+        let genesis_config = budlum_core::chain::genesis::GenesisConfig {
+            chain_id,
+            allocations,
+            validators,
+            block_reward,
+            base_fee,
+            gas_schedule: budlum_core::core::chain_config::Network::from_chain_id(chain_id)
+                .map(|n| n.gas_schedule())
+                .unwrap_or_else(|| budlum_core::core::chain_config::Network::Devnet.gas_schedule()),
+            timestamp: 0,
+        };
+
+        let data = serde_json::to_string_pretty(&genesis_config)
+            .expect("Failed to serialize genesis config");
+        std::fs::write(&output_path, data).expect("Failed to write genesis file");
+        println!(
+            "Genesis configuration file built and saved to: {}",
+            output_path
+        );
+        return;
+    }
+
     let mut config = NodeConfig::parse();
     config.load_with_file();
     let subscriber = FmtSubscriber::builder()
@@ -178,18 +343,55 @@ async fn main() {
         }
     };
 
-    let storage = match Storage::new(&config.db_path) {
-        Ok(s) => Some(s),
-        Err(e) => {
-            println!("Failed to initialize storage: {}", e);
-            None
+    let storage = Some(Storage::new(&config.db_path).unwrap_or_else(|e| {
+        eprintln!(
+            "CRITICAL: Failed to initialize storage at {}: {}",
+            config.db_path, e
+        );
+        std::process::exit(1);
+    }));
+
+    let genesis_config = if let Some(ref path) = config.genesis_file {
+        let data = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("CRITICAL: Failed to read genesis file {}: {}", path, e);
+            std::process::exit(1);
+        });
+        let custom_genesis: budlum_core::chain::genesis::GenesisConfig =
+            serde_json::from_str(&data).unwrap_or_else(|e| {
+                eprintln!("CRITICAL: Failed to parse genesis JSON {}: {}", path, e);
+                std::process::exit(1);
+            });
+        if custom_genesis.chain_id != chain_id {
+            eprintln!(
+                "CRITICAL: Genesis chain ID {} does not match configured chain ID {}",
+                custom_genesis.chain_id, chain_id
+            );
+            std::process::exit(1);
         }
+        println!("Loaded custom genesis configuration from: {}", path);
+        Some(custom_genesis)
+    } else {
+        None
     };
 
-    let pruning_manager = PruningManager::new(1000, 100, "./data/snapshots".to_string());
+    let pruning_manager = config.features_pruning.then(|| {
+        PruningManager::new(
+            1000,
+            100,
+            config
+                .snapshot_dir
+                .clone()
+                .unwrap_or_else(|| "./data/snapshots".to_string()),
+        )
+    });
 
-    let mut blockchain =
-        Blockchain::new(consensus.clone(), storage, chain_id, Some(pruning_manager));
+    let mut blockchain = Blockchain::new_with_genesis(
+        consensus.clone(),
+        storage,
+        chain_id,
+        pruning_manager,
+        genesis_config,
+    );
 
     let domain_id = 1u32;
     let (domain_kind, adapter_name, min_conf) = match consensus_type {
@@ -269,7 +471,7 @@ async fn main() {
 
     if network == budlum_core::core::chain_config::Network::Mainnet && bootstraps.is_empty() {
         eprintln!("Refusing to start mainnet without at least one configured bootnode.");
-        eprintln!("Set [bootnodes].addresses in config/mainnet.toml or pass --bootstrap.");
+        eprintln!("Set p2p.bootnodes in config/mainnet.toml or pass --bootstrap.");
         std::process::exit(1);
     }
 
@@ -277,7 +479,7 @@ async fn main() {
     node.apply_network_security(network);
 
     for addr in &bootstraps {
-        if let Err(e) = node.bootstrap(&addr) {
+        if let Err(e) = node.bootstrap(addr) {
             eprintln!("Failed to bootstrap from {}: {}", addr, e);
         }
     }

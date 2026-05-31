@@ -1,147 +1,28 @@
-# Bölüm 5.3: Snapshot ve Veri Budama (Pruning)
+# Bölüm 5.3: Snapshot ve Budama
 
-Bu bölüm, blok zincirinin sonsuza kadar büyümesini engelleyen **Pruning (Budama)** mekanizmasını ve ağa yeni katılanların günlerce beklemeden senkronize olmasını sağlayan **Snapshot (Anlık Görüntü)** stratejisini analiz eder.
+Snapshot ancak deterministik replay için yeterli konsensüs state'ini taşıyorsa değerlidir. Pruning ise yalnız güvenli recovery kanıtlandığında açılmalıdır. Bu nedenle Budlum snapshot ve budama özelliklerini Mainnet varsayılanı değil, aşamalı hardening işi olarak ele alır.
 
-Kaynak Dosya: `src/chain/snapshot.rs`
+## 1. Güncel Runtime Yolu
 
----
+`StateSnapshot` bugün runtime'a bağlı legacy formattır. Chain kimliği, yükseklik, blok hash'i, bakiyeler, nonce değerleri, validatörler, finalized checkpoint bilgisi ve bütünlük hash'i taşır. P2P snapshot uygulaması farklı `chain_id` değerini ve yerel finality değerinden eski snapshot'ı reddeder.
 
-## 1. Problem: Zincir Şişkinliği (State Bloat)
+`PruningManager` yalnız `features.pruning = true` olduğunda oluşturulur. Mainnet v1 bu feature flag'i reddeder; bu yüzden Mainnet yaklaşımı archive-first'tür.
 
-Bir blok zinciri 10 yıl çalışırsa ne olur?
--   **Bitcoin:** 500 GB+ veri.
--   **Ethereum:** 1 TB+ veri (Arşiv Node).
+## 2. StateSnapshotV2
 
-Her düğümün bu kadar veriyi saklaması pahalıdır. Disk dolar, indeksleme yavaşlar.
-Çözüm: **Sadece son durumu sakla, geçmişi sil.**
+`StateSnapshotV2` sonraki format olarak uygulanmış ve test edilmiştir. Şunları ekler:
 
----
+- `schema_version`, `genesis_hash` ve oluşturulma zamanı,
+- validatörler, unbonding kuyruğu ve finality sertifikaları,
+- epoch indeksi, epoch zamanı, base fee ve block reward,
+- bridge, message, settlement ve global-header özet kökleri.
 
-## 2. Veri Yapıları: Anlık Görüntü
+Snapshot dosyaları yükseklik değerine göre sayısal sıralanır. En yeni JSON parse edilemiyorsa veya bütünlük hash'i geçersizse `.json.corrupted` uzantısıyla karantinaya alınır.
 
-Snapshot, bir video kaydının (Blockchain) tek bir karesini (State) alıp JPG olarak saklamak gibidir.
+## 3. Eksik Production İşleri
 
-### Struct: `Snapshot`
-
-```rust
-#[derive(Serialize, Deserialize)]
-pub struct Snapshot {
-    pub height: u64,             // Hangi blokta çekildi? (Örn: 100.000)
-    pub state_root: String,      // O anki hesap durumunun özeti
-    pub accounts: Vec<Account>,  // Tüm hesap bakiyeleri
-    pub validators: Vec<Validator>, // O anki validatör listesi
-    // --- Hardening Phase 2: Finalite Farkındalığı ---
-    pub finalized_height: u64,   // Kesinleşmiş son yükseklik
-    pub finalized_hash: String,  // Kesinleşmiş son bloğun hash'i
-}
-```
-
-**Analiz:**
-Bu yapı, `AccountState`'in serileştirilmiş (paketlemiş) halidir. 
-
-**Hardening İyileştirmesi:**
-- **Validator Set:** Snapshot artık tüm aktif validatör setini ve stake miktarlarını içerir. Bu sayede Fast Sync ile ağa yeni katılan bir node, checkpoint imzalarını doğrulamak için genesis'ten beri gelen tüm validatör değişimlerini izlemek (replay) zorunda kalmaz.
-- **Snapshot Sync Güvenliği:** Snapshot'ın düğümün `chain_id` değeriyle tam uyuşması zorunludur. P2P ağ katmanında reassemble edilen snapshot'ın asenkron uygulanmasından önce `chain_id` ve çok eski olmama denetimleri (`our_height.saturating_sub(100)`) uygulanır.
-- **Rollback Koruması:** `apply_state_snapshot` fonksiyonunda, gelen snapshot'ın yüksekliğinin aktif `finalized_height` değerinden daha eski olması durumunda durumun geri yüklenmesi kesinlikle reddedilir ve durumun eski bir yüksekliğe geri çekilmesi önlenir.
-- **Finality Awareness:** Snapshot, finalized checkpoint bilgisini de taşıdığı için budama ve recovery sırasında kesinleşmiş kısmın altına inilmez.
-
----
-
-## 3. Algoritmalar: Budama Mantığı
-
-### Fonksiyon: `create_snapshot` (Fotoğraf Çekme)
-
-Belirli aralıklarla (örneğin her 10.000 blokta bir / Epoch sonu) çalışır.
-
-```rust
-pub fn create_snapshot(&self, state: &AccountState) {
-    if state.epoch_index % SNAPSHOT_INTERVAL == 0 {
-        let snapshot = Snapshot {
-            height: state.epoch_index,
-            accounts: state.accounts.values().cloned().collect(),
-            // ...
-        };
-        
-        // Diske kaydet: "snapshot_100000.bin"
-        save_to_disk(snapshot);
-    }
-}
-```
-
-### Fonksiyon: `prune_history` ve Otokontrol (Pruning Hook)
-
-Snapshot alınırken, veritabanını (`sled::Db`) yöneten `Storage` modülüne eski verileri silmesi emredilir.
-
-Budlum Core'daki ana blok işleme döngüsü (bkz: `Blockchain::validate_and_add_block`) her yeni blok geldiğinde şunu sorar:
-
-```rust
-if let Some(ref pruning_manager) = self.pruning_manager {
-    let height = last_block.index;
-    
-    // 1. Snapshot alma vakti geldi mi? (Örn: Her 10.000 blokta bir)
-    if pruning_manager.should_create_snapshot(height) {
-        
-        let snapshot = StateSnapshot::from_state(height, last_block.hash.clone(), self.chain_id, &self.state);
-        pruning_manager.save_snapshot(&snapshot);
-        
-        // 2. Güvenlik marjı dışında kalan, artık ihtiyacımız olmayan eski blokları bul.
-        let prunable = pruning_manager.get_prunable_blocks(self.chain.len() as u64, height);
-        
-        if !prunable.is_empty() {
-            if let Some(ref store) = self.storage {
-                // 3. Blokları ve State eşlemelerini Hard Diskten tamamen sil (Pruning).
-                // DİKKAT: PruningManager, finalized_height'ın altındaki blokların 
-                // asla silinmemesini garanti eder.
-                for block_index in &prunable {
-                    let _ = store.delete_block(*block_index);
-                }
-            }
-        }
-    }
-}
-```
-
-**Neden Finalite Farkındalığı?**
-Eskiden sadece `min_blocks` (güvenlik tamponu) kullanılırken, artık **Finalized Checkpoint** asıl referans noktasıdır. Hiçbir budama işlemi, ağın %100 kesinlik verdiği (finalized) bir bloğu silecek kadar geri gidemez. Bu, veri bütünlüğü için en üst düzey sigortadır.
-
-## 3.5 Replay Semantiği
-
-Snapshot veya diskten zincir yüklenirken state yeniden inşası yalnızca "işlemleri sırayla uygula" şeklinde yapılmaz. Budlum'un güncel akışında:
-
-- blok ödülü,
-- slashing etkileri,
-- epoch geçişleri,
-- dinamik base fee güncellemeleri
-
-aynı zincir kabul yolunda olduğu gibi replay sırasında da tekrar uygulanır.
-
-Bu sayede node yeniden başlatıldığında veya reorg sonrası state yeniden kurulduğunda, çalışma anındaki state ile recovery sonrası state aynı kalır.
-
----
-
-**Neden Güvenlik Marjı (Safety Margin)?**
-Zincirin en ucunda bazen çatallanmalar (Micro-forks) olur. Son 10-20 blok değişebilir. Eğer snapshot alır almaz hemen önceki blokları silersek ve zincir başka bir dala (Reorg) geçerse, verisiz kalırız ve düğüm çöker. Bu yüzden `PruningManager::new(min_blocks, ...)` ayarlandığında, her zaman bir miktar "tampon bölge" (buffer) bırakılır.
-
----
-
-## 4. State Sync (Hızlı Senkronizasyon)
-
-Yeni bir düğüm kurduğunuzu düşünün.
--   **Full Sync (Yavaş):** Genesis'ten başla. 1 Milyon bloğu tek tek indir, işlemleri çalıştır (`apply_transaction`). Aylar sürebilir.
--   **State Sync (Hızlı):**
-    1.  Arkadaşına sor: "En son snapshot kaç?" -> "1.000.000"
-    2.  Snapshot dosyasını indir (500 MB).
-    3.  `AccountState`'i bu dosyadan yükle.
-    4.  Sadece 1.000.001'den itibaren blokları indirmeye başla.
-    5.  Süre: 10 Dakika.
-
-Kullanıcılarımız için **State Sync** varsayılan yöntem olmalıdır.
-
----
+V2 save/load yardımcıları vardır; ancak canlı node henüz V2'yi canonical restore ve fast-sync formatı olarak kullanmaz. Kimliği doğrulanmış snapshot dağıtımı, chunk-session bağlama, restore tatbikatları, replay eşdeğerliği testleri, archive-node politikası ve operasyon runbook'ları tamamlanmalıdır.
 
 ## Özet
 
-`src/snapshot.rs` ve Budama mekanizması sayesinde:
-1.  **Disk Tasarrufu:** TB'larca gereksiz veri saklanmaz.
-2.  **Hız:** Yeni düğümler ağa dakikalar içinde katılır.
-3.  **Sürdürülebilirlik:** Blok zinciri sonsuza kadar çalışabilir.
+Snapshot aşamalı bir recovery alt sistemidir. V2 restore yolu uçtan uca kanıtlanmadan Mainnet v1 için pruning kapalı kalmalıdır.

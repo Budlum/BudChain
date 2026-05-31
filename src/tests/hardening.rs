@@ -67,15 +67,20 @@ mod hardening_tests {
         writeln!(
             file,
             r#"
-            db_path = "/tmp/custom_db"
-            rpc_port = 9999
-            metrics_port = 7070
+            [storage]
+            data_dir = "/tmp/custom_db"
+            [rpc]
+            public_listener = "127.0.0.1:9999"
+            [metrics]
+            listener = "0.0.0.0:7070"
         "#
         )
         .unwrap();
 
-        let mut config = NodeConfig::default();
-        config.config = Some(config_path.to_str().unwrap().to_string());
+        let mut config = NodeConfig {
+            config: Some(config_path.to_str().unwrap().to_string()),
+            ..Default::default()
+        };
 
         assert_ne!(config.rpc_port, 9999);
 

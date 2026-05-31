@@ -1,55 +1,28 @@
-# Chapter 5.3: Snapshots and Data Pruning
+# Chapter 5.3: Snapshots and Pruning
 
-Snapshots and pruning keep a blockchain sustainable over time. Without them, historical data grows forever and new nodes take too long to join.
+Snapshots are useful only when they preserve enough consensus state to replay deterministically. Pruning is useful only when operators can recover safely. Budlum therefore treats both as staged hardening work, not as a Mainnet default.
 
-## 1. Problem: Chain Bloat
+## 1. Legacy Runtime Path
 
-Every block, transaction, state root, certificate, and index consumes disk. A long-lived network must decide which data is required for safety and which data can be archived or pruned.
+`StateSnapshot` is the currently connected runtime format. It stores chain identity, height, block hash, balances, nonces, validators, finalized checkpoint metadata, and an integrity hash. P2P snapshot application rejects mismatched chain IDs and snapshots older than local finality.
 
-## 2. Data Structures: Snapshot
+`PruningManager` is created only when `features.pruning = true`. Mainnet v1 rejects that feature flag, so the Mainnet posture is archive-first.
 
-### Struct: `Snapshot`
+## 2. StateSnapshotV2
 
-A snapshot records a height, block hash, state root, accounts, validator set, and enough metadata to restart from a known-good point.
+`StateSnapshotV2` is implemented and tested as the next format. It adds:
 
-Hardening improves snapshots by aligning them with finalized checkpoints, not arbitrary heights.
+-   `schema_version`, `genesis_hash`, and creation time,
+-   validators, unbonding queue, and finality certificates,
+-   epoch index, epoch timing, base fee, and block reward,
+-   bridge, message, settlement, and global-header summary roots.
 
-## 3. Algorithms: Pruning Logic
+Snapshot files are ordered by numeric height. If the newest JSON file cannot be parsed or fails its integrity hash, it is renamed with `.json.corrupted` so operators can investigate it.
 
-### Function: `create_snapshot`
+## 3. What Is Still Missing?
 
-`create_snapshot` captures the current canonical state and writes it to a portable representation. This is the recovery point.
-
-### Function: `prune_history` and Pruning Hook
-
-Pruning removes historical data older than the retention window while preserving finalized safety boundaries and required indexes.
-
-### Why Finality Awareness?
-
-Pruning behind non-final data is dangerous. Budlum prunes only with finality awareness so the node never deletes data it might need for a valid reorg.
-
-## 3.5 Replay Semantics
-
-Snapshots must preserve enough information for a node to replay forward deterministically from the snapshot height.
-
-### Why a Safety Margin?
-
-A safety margin keeps recent history even after finality, giving operators room for audits, diagnostics, and delayed peer sync.
-
-## 4. State Sync
-
-New nodes can download a recent snapshot, verify its root, and then sync only the remaining blocks. This turns multi-day bootstrap into a much shorter process.
-
-### Snapshot Sync Safety Boundaries
-
-To prevent state rollback attacks and malicious chunk injection, Budlum implements the following strict security controls during state sync:
-1. **Chain ID Verification**: Reassembled snapshots must strictly match the node's configured `chain_id`. Snapshots with mismatched chain IDs are immediately rejected before asynchronous processing.
-2. **Rollback Protection**: The snapshot height must be greater than or equal to the node's current `finalized_height`. Any attempt to apply a snapshot with a height below `finalized_height` is rejected in `apply_state_snapshot`.
-3. **Age Validation**: The P2P network layer filters and discards snapshot chunks that correspond to heights older than `our_height.saturating_sub(100)` to safeguard node bandwidth.
+V2 save/load helpers exist, but the live node does not yet use V2 as its canonical restore and fast-sync format. Production work still includes authenticated snapshot distribution, chunk-session binding, restore drills, replay-equivalence tests, archive-node policy, and operator runbooks.
 
 ## Summary
 
-1.  **Disk savings:** old unnecessary data does not accumulate forever.
-2.  **Speed:** new nodes can join quickly.
-3.  **Sustainability:** the chain can run for years without endless storage growth.
-
+Snapshots are a staged recovery subsystem. Mainnet v1 must keep pruning disabled until the V2 restore path and operational procedures are proven end to end.

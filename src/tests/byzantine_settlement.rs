@@ -345,7 +345,7 @@ mod byzantine_settlement_tests {
 
             let domain = node_a.domain_registry.get(domain_id).unwrap();
             let mut com =
-                DomainCommitment::from_block(&domain, &block, [0u8; 32], [0u8; 32], i as u64)
+                DomainCommitment::from_block(domain, &block, [0u8; 32], [0u8; 32], i as u64)
                     .unwrap();
             com.state_updates
                 .insert(accounts[addr_idx as usize], nonce as u64);
@@ -512,11 +512,11 @@ mod byzantine_settlement_tests {
         node_b.state.add_balance(&alice, 1000);
         node_b.state.add_balance(&bob, 1000);
 
-        let mut b1 = Block::new(1, "h1".to_string(), vec![]);
+        let b1 = Block::new(1, "h1".to_string(), vec![]);
         let mut com1 = DomainCommitment::from_block(&pow_a, &b1, [0u8; 32], [0u8; 32], 1).unwrap();
         com1.state_updates.insert(alice, 1);
 
-        let mut b2 = Block::new(1, "h2".to_string(), vec![]);
+        let b2 = Block::new(1, "h2".to_string(), vec![]);
         let mut com2 = DomainCommitment::from_block(&pos_a, &b2, [0u8; 32], [0u8; 32], 1).unwrap();
         com2.state_updates.insert(bob, 1);
 
@@ -552,11 +552,11 @@ mod byzantine_settlement_tests {
         let alice = Address::from([1u8; 32]);
         node.state.add_balance(&alice, 1000);
 
-        let mut b1 = Block::new(1, "h1".to_string(), vec![]);
+        let b1 = Block::new(1, "h1".to_string(), vec![]);
         let mut com1 = DomainCommitment::from_block(&pow, &b1, [0u8; 32], [0u8; 32], 1).unwrap();
         com1.state_updates.insert(alice, 1);
 
-        let mut b2 = Block::new(1, "h2".to_string(), vec![]);
+        let b2 = Block::new(1, "h2".to_string(), vec![]);
         let mut com2 = DomainCommitment::from_block(&pow, &b2, [0u8; 32], [0u8; 32], 2).unwrap();
         com2.state_updates.insert(alice, 1);
 
@@ -614,7 +614,7 @@ mod byzantine_settlement_tests {
 
     #[tokio::test]
     async fn test_async_gossip_message_delay_reordering_convergence() {
-        let mut nodes = vec![make_node(), make_node(), make_node()];
+        let mut nodes = [make_node(), make_node(), make_node()];
         let accounts: Vec<Address> = (0..10).map(|i| Address::from([i as u8; 32])).collect();
         for node in nodes.iter_mut() {
             for acc in &accounts {
@@ -646,7 +646,7 @@ mod byzantine_settlement_tests {
 
     #[tokio::test]
     async fn test_async_gossip_packet_drop_later_recovery() {
-        let mut nodes = vec![make_node(), make_node(), make_node()];
+        let mut nodes = [make_node(), make_node(), make_node()];
         let accounts: Vec<Address> = (0..10).map(|i| Address::from([i as u8; 32])).collect();
         for node in nodes.iter_mut() {
             for acc in &accounts {
@@ -683,8 +683,8 @@ mod byzantine_settlement_tests {
         expected_header.timestamp_ms = 0;
         let expected_hash = expected_header.calculate_hash();
 
-        for i in 1..nodes.len() {
-            let mut hi_header = nodes[i].build_global_header(None);
+        for node in nodes.iter().skip(1) {
+            let mut hi_header = node.build_global_header(None);
             hi_header.timestamp_ms = 0;
             assert_eq!(expected_hash, hi_header.calculate_hash());
         }
@@ -731,14 +731,14 @@ mod byzantine_settlement_tests {
             }
         }
         let commitments = make_non_conflicting_commitments(&nodes[0], &accounts, 500);
-        for com in commitments.iter().cloned() {
-            for node_idx in 0..node_count {
+        for com in commitments.iter() {
+            for node in nodes.iter_mut().take(node_count) {
                 if rng.random_bool(0.20) {
                     continue;
                 }
                 let duplicates = if rng.random_bool(0.30) { 2 } else { 1 };
                 for _ in 0..duplicates {
-                    let _ = nodes[node_idx].submit_domain_commitment(com.clone());
+                    let _ = node.submit_domain_commitment(com.clone());
                 }
             }
         }
@@ -755,8 +755,8 @@ mod byzantine_settlement_tests {
         expected_header.timestamp_ms = 0;
         let expected_hash = expected_header.calculate_hash();
 
-        for i in 1..node_count {
-            let mut hi_header = nodes[i].build_global_header(None);
+        for (i, node) in nodes.iter().enumerate().take(node_count).skip(1) {
+            let mut hi_header = node.build_global_header(None);
             hi_header.timestamp_ms = 0;
             assert_eq!(
                 expected_hash,
@@ -767,15 +767,15 @@ mod byzantine_settlement_tests {
         }
         for acc in &accounts {
             let expected_nonce = nodes[0].state.get_nonce(acc);
-            for i in 1..node_count {
-                assert_eq!(expected_nonce, nodes[i].state.get_nonce(acc));
+            for node in nodes.iter().take(node_count).skip(1) {
+                assert_eq!(expected_nonce, node.state.get_nonce(acc));
             }
         }
     }
 
     #[tokio::test]
     async fn test_gossip_equivocation_detection_freezes_domain_globally() {
-        let mut nodes = vec![make_node(), make_node(), make_node()];
+        let mut nodes = [make_node(), make_node(), make_node()];
         let domain_id = 1;
         let c1 = make_domain_commitment_at_height(&nodes[0], domain_id, 10, "state_a", 10);
         let c2 = make_domain_commitment_at_height(&nodes[0], domain_id, 10, "state_b", 11);
@@ -786,7 +786,7 @@ mod byzantine_settlement_tests {
             let _ = node.submit_domain_commitment(c2.clone());
         }
         for node in nodes.iter() {
-            let domain = node.domain_registry.get(domain_id as u32).unwrap();
+            let domain = node.domain_registry.get(domain_id).unwrap();
             assert_eq!(domain.status, DomainStatus::Frozen);
         }
         let c3 = make_domain_commitment_at_height(&nodes[0], domain_id, 11, "state_c", 12);

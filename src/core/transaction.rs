@@ -148,6 +148,7 @@ impl Transaction {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_chain_id(
         from: Address,
         to: Address,
@@ -233,7 +234,7 @@ impl Transaction {
             TransactionType::Vote => 3,
             TransactionType::ContractCall => 4,
         };
-        hasher.update(&[type_byte]);
+        hasher.update([type_byte]);
 
         hasher.finalize().into()
     }
@@ -305,7 +306,7 @@ impl Transaction {
                     println!("Contract call TX amount must be 0");
                     return false;
                 }
-                if self.data.is_empty() || self.data.len() % 8 != 0 {
+                if self.data.is_empty() || !self.data.len().is_multiple_of(8) {
                     println!("Contract call TX data must be non-empty BudZKVM bytecode");
                     return false;
                 }

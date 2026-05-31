@@ -20,3 +20,6 @@ Run the relevant Rust test targets from the repository root with `cargo test`. M
 
 Distributed systems fail. The goal is to fail in ways that preserve safety: reject bad data, log useful context, keep honest peers connected, and avoid panics from malformed input.
 
+## 5. Current Verification Baseline
+
+The workspace currently passes `282` Rust tests. New hardening coverage includes durable-commit rollback recovery, Snapshot V2 serialization, numeric snapshot ordering, corrupt-snapshot quarantine, config parsing, and security middleware behavior. CI also runs formatting, `cargo check`, Clippy with warnings denied, workspace tests, and a locked release build.

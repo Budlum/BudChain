@@ -26,11 +26,22 @@ Dirty tracking matters because a single account update should not force the node
 2.  **Disk-friendly persistence:** changed accounts are written individually as `ACCT:{pubkey}`.
 3.  **Merkle proofs:** light clients can verify account balances with a path and the root.
 
-## 2. Dynamic Parameters and Governance
+## 2. Composite Consensus State Root
 
-Runtime parameters such as gas values, limits, and validator settings are part of the state model. This gives the chain a controlled way to evolve without scattering configuration across unrelated modules.
+The account trie is only one part of the canonical state commitment. `calculate_state_root` now wraps that account root in a versioned `ConsensusStateV2` commitment containing:
 
-## 3. Functions and Business Logic
+-   validator state and sorted unbonding entries,
+-   `epoch_index`, `base_fee`, and `block_reward`,
+-   bridge, message, settlement, and global-header summary roots,
+-   an explicit governance-disabled marker.
+
+This matters because two nodes must not report the same state root when account balances match but validator economics or settlement state differ.
+
+## 3. Dynamic Parameters and Governance
+
+Runtime parameters such as gas values, limits, and validator settings are part of the state model. Governance code exists for research, but Mainnet v1 configuration explicitly rejects `features.governance = true`. BudZKVM contract execution is also experimental and rejected by the Mainnet v1 profile.
+
+## 4. Functions and Business Logic
 
 ### `validate_transaction` and `validate_transaction_with_context`
 

@@ -4,6 +4,7 @@ use crate::core::block::{Block, BlockHeader};
 use crate::core::transaction::{Transaction, TransactionType};
 use crate::network::protocol::NetworkMessage;
 
+#[allow(clippy::all)]
 pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/budlum.network.rs"));
 }

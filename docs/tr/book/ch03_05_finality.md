@@ -1,6 +1,6 @@
 # Bölüm 3.5: Finalite Katmanı (BLS)
 
-Bu bölüm, Budlum blok zincirinin "kesinlik" (finality) kazandığı **BLS Finalite Katmanı**'nı açıklar. Bu katman, uzun süreli zincir bölünmelerini (split) engeller ve saniyeler içinde geri alınamazlık garantisi verir.
+Bu bölüm, Budlum blok zinciri için geliştirilen **BLS Finalite Katmanı**'nı açıklar. Kütüphane mantığı önemli korumalar içerir; ancak canlı ağ entegrasyonu henüz Mainnet finality garantisi vermez.
 
 Kaynak Dosyalar: `src/chain/finality.rs`, `src/chain/blockchain.rs`
 
@@ -32,15 +32,11 @@ Prevote çoğunluğu sağlandığında, validatörler ikinci bir onay oyu verir:
 
 ---
 
-## 3. Otomatik Oylama Döngüsü
+## 3. Runtime Entegrasyon Durumu
 
-**Hardening** kapsamında, validatörlerin manuel müdahalesine gerek kalmadan arka planda çalışan bir oylama mekanizması eklenmiştir:
+`FinalityAggregator`, BLS sertifika doğrulaması, epoch snapshot'ları, QC gating ve katı `floor(2N/3) + 1` quorum hesabı kodda bulunur ve test edilir.
 
-- **Interval:** Her 30 saniyede bir tetiklenir.
-- **Kontrol:** Eğer mevcut blok yüksekliği bir checkpoint ise ve henüz oy verilmemişse, otomatik olarak bir `Prevote` mesajı yayımlanır.
-- **Ağ Duyurusu:** Oylar `blocks` Gossipsub kanalı üzerinden tüm ağa yayılır.
-
-Bu sayede ağ, konsensüs sağlandığı sürece kendi kendine ilerlemeye (liveness) devam eder.
+Canlı node döngüsü ise henüz production finality coordinator değildir. Bugün 30 saniyelik döngü peer ID ve boş imza taşıyan bir placeholder `Prevote` yayımlar. Gelen `Prevote` ve `Precommit` mesajları rate-limit kontrolünden sonra loglanır; canlı aggregator'a işlenmez. İmzalı validatör vote üretimi, canlı agregasyon, precommit ilerlemesi ve çok node'lu liveness doğrulaması Mainnet engelidir.
 
 ---
 
@@ -60,7 +56,7 @@ pub struct FinalityCert {
 ```
 
 ### 3.1. Agregasyon Matematiği (Hardening)
-Budlum'un üretim sürümünde imzalar sadece yan yana dizilmez (concatenation). `bls12_381` kütüphanesi kullanılarak G1 grubu üzerinde gerçek bir matematiksel toplama yapılır. Bu, sertifika boyutunun validatör sayısından bağımsız olarak her zaman sabit (96 byte) kalmasını sağlar.
+Güncel finality kütüphanesinde imzalar sadece yan yana dizilmez (concatenation). `bls12_381` kütüphanesi kullanılarak G1 grubu üzerinde gerçek bir matematiksel toplama yapılır. Bu, sertifika boyutunun validatör sayısından bağımsız olarak her zaman sabit (96 byte) kalmasını sağlar.
 
 ### 3.2. QC Gating
 `FinalityCert` kabulü artık yalnızca BLS aggregate signature doğrulaması değildir:

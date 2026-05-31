@@ -73,6 +73,7 @@ impl BridgeState {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn lock(
         &mut self,
         source_domain: DomainId,

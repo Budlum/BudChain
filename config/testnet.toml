@@ -1,42 +1,39 @@
 [network]
-name = "testnet"
+profile = "testnet"
 chain_id = 42
-port = 5001
+genesis_file = "./config/testnet-genesis.json"
 
-[consensus]
-type = "pos"
-min_stake = 10000
-epoch_len = 50
-
-[bootnodes]
-addresses = []
-fallback = []
-dns_seeds = []
-
-[rpc]
-enabled = true
-host = "0.0.0.0"
-port = 18545
-auth_required = true
-api_key_env = "BUDLUM_TESTNET_RPC_API_KEY"
-allowed_ips = []
-cors_origins = []
-rate_limit_per_minute = 600
-
-[metrics]
-port = 19090
+[node]
+role = "validator"
 
 [storage]
-db_path = "./data/testnet/budlum.db"
+data_dir = "./data/testnet/budlum.db"
 snapshot_dir = "./data/testnet/snapshots"
-backups_enabled = true
 backup_dir = "./data/testnet/backups"
+backups_enabled = true
 
-[validator]
-key_file = "./secrets/testnet-validator.key"
-backend = "local_file"
-
-[security]
+[p2p]
+identity_file = "./secrets/testnet-node-id.key"
+bootnodes = []
+dns_seeds = []
 max_peers = 75
 banned_peer_db = "./data/testnet/banned-peers.json"
 mdns_enabled = false
+
+[rpc]
+public_listener = "0.0.0.0:18545"
+operator_listener = "127.0.0.1:18546"
+trusted_proxies = []
+enabled = true
+
+[metrics]
+listener = "0.0.0.0:19090"
+
+[validator]
+key_file = "./secrets/testnet-validator.key"
+backend = "softhsm"
+
+[features]
+governance = false
+zkvm_contracts = false
+pruning = false

@@ -19,7 +19,7 @@ use crate::domain::{
     PoSFinalityAdapter, PoWFinalityAdapter, ZkFinalityAdapter,
 };
 use crate::execution::executor::Executor;
-use crate::mempool::pool::{Mempool, MempoolConfig};
+use crate::mempool::pool::Mempool;
 use crate::settlement::{
     merkle_root, GlobalBlockHeader, ProofVerificationError, SettlementProofVerifier,
     VerifiedDomainEvent,
@@ -64,6 +64,16 @@ impl Blockchain {
         chain_id: u64,
         pruning_manager: Option<PruningManager>,
     ) -> Self {
+        Self::new_with_genesis(consensus, storage, chain_id, pruning_manager, None)
+    }
+
+    pub fn new_with_genesis(
+        consensus: Arc<dyn ConsensusEngine>,
+        storage: Option<Storage>,
+        chain_id: u64,
+        pruning_manager: Option<PruningManager>,
+        genesis_config: Option<GenesisConfig>,
+    ) -> Self {
         info!("Consensus: {}", consensus.info());
         let mut chain_vec = Vec::new();
 
@@ -78,15 +88,77 @@ impl Blockchain {
             }
         }
 
-        let genesis_config = Network::from_chain_id(chain_id)
-            .map(GenesisConfig::for_network)
-            .unwrap_or_else(|| GenesisConfig::new(chain_id));
+        let resolved_genesis_config = genesis_config.unwrap_or_else(|| {
+            Network::from_chain_id(chain_id)
+                .map(GenesisConfig::for_network)
+                .unwrap_or_else(|| GenesisConfig::new(chain_id))
+        });
 
-        let mut state = genesis_config.build_state();
+        let mut state = resolved_genesis_config.build_state();
 
         if !loaded_chain {
-            let genesis = genesis_config.build_genesis_block();
+            let genesis = resolved_genesis_config.build_genesis_block();
+            if let Some(ref store) = storage {
+                let mut accounts_to_save = Vec::new();
+                for (pubkey, account) in &state.accounts {
+                    accounts_to_save.push((*pubkey, account.clone()));
+                }
+                let batch = crate::storage::traits::DurableCommitBatch {
+                    block: genesis.clone(),
+                    state_root: genesis.state_root.clone(),
+                    finality_cert: None,
+                    global_headers: Vec::new(),
+                    bridge_state: Some(BridgeState::new()),
+                    accounts: accounts_to_save,
+                };
+                if let Err(e) = store.commit_durable_batch(&batch) {
+                    error!("Failed to persist genesis block to storage: {:?}", e);
+                }
+            }
             chain_vec.push(genesis);
+        } else {
+            // VERIFICATION CHAIN (Doğrulama Zinciri):
+            // Check that the existing genesis block in DB matches resolved_genesis_config / network config!
+            let db_genesis = &chain_vec[0];
+            let expected_genesis = resolved_genesis_config.build_genesis_block();
+
+            // 1. Chain ID check
+            if db_genesis.chain_id != chain_id {
+                error!(
+                    "CRITICAL ERROR: Startup Chain ID mismatch! DB genesis chain_id: {}, Configured chain_id: {}. Fail-closed startup.",
+                    db_genesis.chain_id, chain_id
+                );
+                #[cfg(not(test))]
+                std::process::exit(1);
+                #[cfg(test)]
+                panic!("Startup Chain ID mismatch!");
+            }
+
+            // 2. Genesis Hash check
+            if db_genesis.hash != expected_genesis.hash {
+                error!(
+                    "CRITICAL ERROR: Startup Genesis Hash mismatch! DB genesis hash: {}, Expected hash: {}. Fail-closed startup.",
+                    db_genesis.hash, expected_genesis.hash
+                );
+                #[cfg(not(test))]
+                std::process::exit(1);
+                #[cfg(test)]
+                panic!("Startup Genesis Hash mismatch!");
+            }
+
+            // 3. Network Magic check
+            let db_network = Network::from_chain_id(db_genesis.chain_id);
+            let current_network = Network::from_chain_id(chain_id);
+            if db_network != current_network {
+                error!(
+                    "CRITICAL ERROR: Startup Network Magic mismatch! DB network: {:?}, Configured network: {:?}. Fail-closed startup.",
+                    db_network.map(|n| n.magic_bytes()), current_network.map(|n| n.magic_bytes())
+                );
+                #[cfg(not(test))]
+                std::process::exit(1);
+                #[cfg(test)]
+                panic!("Startup Network Magic mismatch!");
+            }
         }
 
         let mut snapshot_height = 0;
@@ -163,7 +235,7 @@ impl Blockchain {
 
         let mempool_config = Network::from_chain_id(chain_id)
             .map(|network| network.mempool_config())
-            .unwrap_or_else(MempoolConfig::default);
+            .unwrap_or_default();
         let mut mempool = Mempool::new(mempool_config);
         if let Some(ref store) = storage {
             if let Ok(txs) = store.load_mempool_txs() {
@@ -288,10 +360,7 @@ impl Blockchain {
             }
         }
         if blocks.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Chain broken or empty",
-            ));
+            return Err(std::io::Error::other("Chain broken or empty"));
         }
         blocks.reverse();
         self.chain = blocks;
@@ -436,10 +505,9 @@ impl Blockchain {
         chain_id: u64,
     ) -> Vec<GlobalBlockHeader> {
         let mut valid = Vec::new();
-        let mut expected_height = 0u64;
         let mut expected_prev_hash = [0u8; 32];
-
-        for header in headers {
+        for (expected_height, header) in headers.into_iter().enumerate() {
+            let expected_height = expected_height as u64;
             if header.chain_id != chain_id {
                 warn!(
                     "Skipping stored global header with wrong chain id: height={}, chain_id={}",
@@ -463,7 +531,6 @@ impl Blockchain {
             }
 
             expected_prev_hash = header.calculate_hash_bytes();
-            expected_height += 1;
             valid.push(header);
         }
 
@@ -914,6 +981,7 @@ impl Blockchain {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn lock_bridge_transfer(
         &mut self,
         source_domain: crate::domain::DomainId,
@@ -1433,7 +1501,7 @@ impl Blockchain {
                 if tx.amount != 0 {
                     reasons.push("contract_amount_must_be_zero".to_string());
                 }
-                if tx.data.is_empty() || tx.data.len() % 8 != 0 {
+                if tx.data.is_empty() || !tx.data.len().is_multiple_of(8) {
                     reasons.push("invalid_contract_bytecode".to_string());
                 }
             }
@@ -1522,13 +1590,45 @@ impl Blockchain {
             state.apply_slashing(evidences, slash_ratio_fixed);
         }
 
-        if block.index > 0 && block.index % EPOCH_LENGTH == 0 {
+        if block.index > 0 && block.index.is_multiple_of(EPOCH_LENGTH) {
             state.advance_epoch(block.timestamp);
         }
 
         if block.index > 0 {
             Self::adjust_base_fee(state, block.transactions.len());
         }
+    }
+
+    fn commit_block_durable(
+        &self,
+        block: &Block,
+        committed_state: &AccountState,
+    ) -> Result<(), String> {
+        if let Some(ref store) = self.storage {
+            let mut accounts_to_save = Vec::new();
+            for (pubkey, account) in &committed_state.accounts {
+                accounts_to_save.push((*pubkey, account.clone()));
+            }
+
+            let finality_cert = self
+                .pending_finality_certs
+                .get(&block.index)
+                .and_then(|certs| certs.first().cloned());
+
+            let batch = crate::storage::traits::DurableCommitBatch {
+                block: block.clone(),
+                state_root: block.state_root.clone(),
+                finality_cert,
+                global_headers: self.global_headers.clone(),
+                bridge_state: Some(self.bridge_state.clone()),
+                accounts: accounts_to_save,
+            };
+
+            store
+                .commit_durable_batch(&batch)
+                .map_err(|e| format!("Failed to commit durable batch: {}", e))?;
+        }
+        Ok(())
     }
 
     fn apply_block_effects(
@@ -1575,18 +1675,37 @@ impl Blockchain {
             Ok(state) => state,
             Err(_) => return None,
         };
+        committed_state.bridge_root = self.bridge_state.root();
+        committed_state.message_root = self.message_registry.root();
+        let settlement_root = if self.settlement_finality_hashes.is_empty() {
+            merkle_root(&[])
+        } else {
+            merkle_root(&self.settlement_finality_hashes)
+        };
+        committed_state.settlement_root = settlement_root;
+        committed_state.global_header_summary = self
+            .global_headers
+            .last()
+            .map(|h| h.calculate_hash_bytes())
+            .unwrap_or([0u8; 32]);
         block.state_root = committed_state.calculate_state_root();
 
         if let Err(_e) = self.consensus.prepare_block(&mut block, &self.state) {
             return None;
         }
 
+        // Commit durably to database first, ensuring fail-closed security
+        if let Err(e) = self.commit_block_durable(&block, &committed_state) {
+            tracing::error!(
+                "Failed to commit block {} durably: {}. Block production aborted.",
+                block.index,
+                e
+            );
+            return None;
+        }
+
         self.state = committed_state;
         self.record_validator_snapshot(self.state.epoch_index);
-
-        if let Some(ref store) = self.storage {
-            let _ = store.commit_block(&block, &block.state_root);
-        }
 
         self.chain.push(block.clone());
         if block.slashing_evidence.is_some() {
@@ -1712,6 +1831,19 @@ impl Blockchain {
         let mut commit_state = Self::apply_block_effects(&self.state, &block)?;
 
         if block.index > 0 {
+            commit_state.bridge_root = self.bridge_state.root();
+            commit_state.message_root = self.message_registry.root();
+            let settlement_root = if self.settlement_finality_hashes.is_empty() {
+                merkle_root(&[])
+            } else {
+                merkle_root(&self.settlement_finality_hashes)
+            };
+            commit_state.settlement_root = settlement_root;
+            commit_state.global_header_summary = self
+                .global_headers
+                .last()
+                .map(|h| h.calculate_hash_bytes())
+                .unwrap_or([0u8; 32]);
             let computed_root = commit_state.calculate_state_root();
             if computed_root != block.state_root {
                 return Err(format!(
@@ -1721,9 +1853,9 @@ impl Blockchain {
             }
         }
 
-        if let Some(ref store) = self.storage {
-            let _ = store.commit_block(&block, &block.state_root);
-        }
+        // Commit durably to database first, ensuring fail-closed security
+        self.commit_block_durable(&block, &commit_state)
+            .map_err(|e| format!("Failed to commit block {} durably: {}", block.index, e))?;
 
         self.state = commit_state;
         self.record_validator_snapshot(self.state.epoch_index);
@@ -1821,9 +1953,10 @@ impl Blockchain {
             let block = &chain[i];
             let previous_chain = &chain[..i];
             let dummy_state = AccountState::new();
-            if let Err(_) = self
+            if self
                 .consensus
                 .validate_block(block, previous_chain, &dummy_state)
+                .is_err()
             {
                 return false;
             }
@@ -1909,8 +2042,14 @@ impl Blockchain {
                     let _ = store.delete_tx_index(&tx.hash);
                 }
             }
+            let mut current_state = if fork_point > 0 {
+                Blockchain::rebuild_state(&self.chain[..fork_point])?
+            } else {
+                AccountState::new()
+            };
             for block in &self.chain[fork_point..] {
-                let _ = store.commit_block(block, &block.state_root);
+                current_state = Self::apply_block_effects(&current_state, block)?;
+                self.commit_block_durable(block, &current_state)?;
             }
             if let Some(last) = self.chain.last() {
                 let _ = store.save_last_hash(&last.hash);
@@ -2245,8 +2384,10 @@ mod tests {
         let alice_vrf_pub = alice_keys.vrf_key.public.to_bytes().to_vec();
         let alice_pub = Address::from(alice_key.public_key_bytes());
 
-        let mut config = PoSConfig::default();
-        config.slashing_penalty = (50 * crate::core::chain_config::FIXED_POINT_SCALE) / 100;
+        let config = PoSConfig {
+            slashing_penalty: (50 * crate::core::chain_config::FIXED_POINT_SCALE) / 100,
+            ..Default::default()
+        };
 
         let engine = Arc::new(PoSEngine::new(config.clone(), Some(alice_keys.clone())));
 
@@ -2293,7 +2434,7 @@ mod tests {
         let fresh_engine = Arc::new(PoSEngine::new(config, Some(alice_keys)));
         let mut blockchain2 = Blockchain::new(fresh_engine, None, 1337, None);
         blockchain2.state.validators.clear();
-        blockchain2.state.add_validator(alice_pub.clone(), 2000);
+        blockchain2.state.add_validator(alice_pub, 2000);
         if let Some(v) = blockchain2.state.get_validator_mut(&alice_pub) {
             v.vrf_public_key = alice_vrf_pub.clone();
         }

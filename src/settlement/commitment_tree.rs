@@ -8,7 +8,7 @@ pub fn merkle_root(leaves: &[Hash32]) -> Hash32 {
 
     let mut level = leaves.to_vec();
     while level.len() > 1 {
-        let mut next = Vec::with_capacity((level.len() + 1) / 2);
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
         for pair in level.chunks(2) {
             let left = pair[0];
             let right = if pair.len() == 2 { pair[1] } else { pair[0] };

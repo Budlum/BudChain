@@ -1,0 +1,123 @@
+name: Budlum Core CI
+
+on:
+  push:
+    branches: [ main, master, dev ]
+  pull_request:
+    branches: [ main, master, dev ]
+
+jobs:
+  fmt:
+    name: Rustfmt Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+        with:
+          path: infra
+
+      - name: Checkout BudZKVM Dependency
+        uses: actions/checkout@v4
+        with:
+          repository: Budlum/BudZKVM
+          path: BudZKVM
+          token: ${{ secrets.BUDZKVM_READ_TOKEN || github.token }}
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt
+
+      - name: Check Formatting
+        working-directory: infra
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+        with:
+          path: infra
+
+      - name: Checkout BudZKVM Dependency
+        uses: actions/checkout@v4
+        with:
+          repository: Budlum/BudZKVM
+          path: BudZKVM
+          token: ${{ secrets.BUDZKVM_READ_TOKEN || github.token }}
+
+      - name: Install Protoc (Protobuf Compiler)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: clippy
+
+      - name: Run Cargo Check
+        working-directory: infra
+        run: cargo check --workspace --all-targets --all-features
+
+      - name: Run Clippy
+        working-directory: infra
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+        with:
+          path: infra
+
+      - name: Checkout BudZKVM Dependency
+        uses: actions/checkout@v4
+        with:
+          repository: Budlum/BudZKVM
+          path: BudZKVM
+          token: ${{ secrets.BUDZKVM_READ_TOKEN || github.token }}
+
+      - name: Install Protoc (Protobuf Compiler)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+
+      - name: Run Workspace Tests
+        working-directory: infra
+        run: cargo test --workspace
+
+  build:
+    name: Production Release Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+        with:
+          path: infra
+
+      - name: Checkout BudZKVM Dependency
+        uses: actions/checkout@v4
+        with:
+          repository: Budlum/BudZKVM
+          path: BudZKVM
+          token: ${{ secrets.BUDZKVM_READ_TOKEN || github.token }}
+
+      - name: Install Protoc (Protobuf Compiler)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+
+      - name: Build Release Binary
+        working-directory: infra
+        run: cargo build --release --locked

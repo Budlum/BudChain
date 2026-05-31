@@ -6,7 +6,7 @@ mod distributed_settlement_tests {
     use crate::core::address::Address;
     use crate::core::block::Block;
     use crate::domain::plugin::default_domain;
-    use crate::domain::{ConsensusKind, DomainCommitment, DomainStatus};
+    use crate::domain::{ConsensusKind, DomainCommitment};
     use crate::network::node::{Node, NodeClient};
     use crate::storage::db::Storage;
     use std::path::PathBuf;
@@ -97,19 +97,17 @@ mod distributed_settlement_tests {
                 &b,
                 [0u8; 32],
                 [0u8; 32],
-                i as u64,
+                i,
             )
             .unwrap();
-            com.state_updates.insert(alice, i as u64);
+            com.state_updates.insert(alice, i);
             commitments.push(com);
         }
 
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let clients = vec![&n1, &n2, &n3, &n4, &n5];
+        let clients = [&n1, &n2, &n3, &n4, &n5];
 
         for com in commitments {
-            let idx = rng.gen_range(0..clients.len());
+            let idx = rand::random_range(0..clients.len());
             let sender = clients[idx];
             sender.node_client.broadcast_domain_commitment_sync(com);
             sleep(Duration::from_millis(100)).await;

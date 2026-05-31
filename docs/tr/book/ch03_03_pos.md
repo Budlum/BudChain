@@ -100,7 +100,7 @@ Bir liderin aynı slot içinde iki farklı blok üretip imzalamasıdır. Bu, zin
 
 ### Fonksiyon: `record_block` (Kalıcılık ve Dedektiflik)
 
-Ağa gelen her bloğu kaydeder. **Mainnet Ready** aşamasında, bu fonksiyon artık değişiklikleri anında diske (`Storage`) yazar.
+Ağa gelen her bloğu kaydeder. Güncel hardening aşamasında canonical değişiklikler kalıcı storage yoluna yazılır; bunun Mainnet operasyonlarına hazır sayılması için restore ve fault-injection çalışmaları ayrıca tamamlanmalıdır.
 
 ```rust
 pub fn record_block(&self, block: &Block) {

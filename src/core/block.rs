@@ -34,7 +34,7 @@ impl BlockHeader {
             timestamp: block.timestamp,
             previous_hash: block.previous_hash.clone(),
             hash: block.hash.clone(),
-            producer: block.producer.clone(),
+            producer: block.producer,
             chain_id: block.chain_id,
             state_root: block.state_root.clone(),
             tx_root: block.tx_root.clone(),
@@ -200,7 +200,7 @@ impl Block {
             tx_hashes = next_level;
         }
 
-        hex::encode(&tx_hashes[0])
+        hex::encode(tx_hashes[0])
     }
 
     pub fn calculate_hash(&self) -> String {

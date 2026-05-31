@@ -16,7 +16,7 @@ Dünyanın her yerindeki bilgisayarların anlaşabilmesi için ortak bir `Enum` 
 
 Ağdaki tüm iletişim bir enum (numaralandırılmış yapı) üzerinden geçer. En önemli türleri şunlardır:
 
-1.  **El Sıkışma (Handshake / HandshakeAck)**: Ağa yeni katılanlar bağlanırken versiyon ve `chain_id` bilgilerini doğrularlar. **Hardening Phase 2** ile artık `validator_set_hash` (aktif validatörlerin özeti) ve `supported_schemes` (ED25519, BLS, DILITHIUM) bilgileri de doğrulanır. Uyumsuz olanlar anında engellenir.
+1.  **El Sıkışma (Handshake / HandshakeAck)**: Ağa yeni katılanlar bağlanırken versiyon ve `chain_id` bilgilerini doğrularlar. `validator_set_hash` ve `supported_schemes` (ED25519, BLS, DILITHIUM) bilgileri de taşınır ve loglanır; ancak bunları zorlayan policy henüz tamamlanmamıştır.
 2.  **Block**: Yeni çıkarılan bir bloğun tüm peer'lara (eşlere) yayılması.
 3.  **Transaction**: Yeni işlemlerin yayılması.
 4.  **Finalite Oyları (Prevote / Precommit)**: BLS tabanlı finalite katmanı oyları.
@@ -35,13 +35,13 @@ Budlum Core iletişimi **GossipSub** üzerinden yürütür. Ancak her veri Gossi
 
 ## Request-Response Senkronizasyonu
 
-**Production Hardening** aşamasında, büyük veri transferleri (geçmiş blokları indirme) GossipSub üzerinden değil, doğrudan birebir (Peer-to-Peer) **Request-Response** protokolü ile yapılır.
+Budlum, büyük veri transferleri için doğrudan birebir **Request-Response** protokol altyapısı içerir.
 
 - **Protokol Kimliği:** `/budlum/sync/1.0.0`
 - **SyncCodec:** Veriyi `length-prefixed` (uzunluk ön ekli) şekilde serileştiren ve akış (stream) üzerinden güvenli aktaran özel bir yapı.
 - **Aktör Entegrasyonu:** `Node` asenkron döngüsü, gelen istekleri `ChainActor`'a iletir; böylece blok ve headerlar kilitlenme (lock) olmadan yüksek hızda servis edilir.
 - **Handshake ile Otomatik Sync:** Peer handshake içinde daha yüksek `best_height` bildirirse node otomatik `GetHeaders` başlatır ve gerçek senkronizasyon durumunu `bud_syncing` üzerinden döner.
-- **Neden?** GossipSub "herkese bağırır". Senkronizasyonda ise sadece bir kişiye "bana X ile Y arasındaki blokları ver" deriz. Bu ağ trafiğini %90 azaltırken, senkronizasyon hızını 5-10 kat artırır.
+- **Eksik Geçiş:** Bazı geçmiş veri akışları halen Gossipsub broadcast kullanır. Mainnet öncesi yanıtların isteyen peer'a bağlandığı doğrudan routing tamamlanmalıdır.
 
 ## Slashing Evidence Gossip
 
@@ -90,3 +90,6 @@ let gossipsub_config = GossipsubConfigBuilder::default()
 ```
 
 Bu limit sayesinde, 1 MB'tan büyük bloklar veya mesajlar ağda otomatik olarak reddedilir. Bu bir konsensüs kuralıdır. Eğer blok boyutunu artırmak isterseniz, tüm ağın yazılımını güncellemesi (Hard Fork) gerekir.
+> **Runtime sınırı:** Handshake `version` ve `chain_id` uyumsuzluğunu reddeder. `validator_set_hash` ve `supported_schemes` taşınır ve loglanır; ancak henüz policy olarak zorlanmaz. Request-response sync altyapısı vardır fakat bazı geçmiş veri akışları halen Gossipsub broadcast kullanır. Mainnet öncesi doğrudan peer routing tamamlanmalıdır.
+
+Güncel limitler: ağ mesajı için 10 MiB, blok için 1 MiB, işlem için 100 KiB, chain-sync batch için 500 blok ve snapshot-sync batch için 256 blok.

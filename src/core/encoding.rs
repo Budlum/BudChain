@@ -95,6 +95,7 @@ pub fn encode_block_summary(block: &Block) -> Vec<u8> {
     bytes
 }
 
+#[allow(clippy::absurd_extreme_comparisons)]
 pub fn is_compatible_version(remote_major: u32, remote_minor: u32) -> bool {
     if remote_major != PROTOCOL_VERSION_MAJOR {
         return false;

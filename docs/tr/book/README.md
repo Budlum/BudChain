@@ -10,9 +10,9 @@ Kod tabanımız **Rust** ile yazılmıştır ve modern teknolojileri kullanır:
 -   **Kriptografi:** Ed25519 ve BLS (Finalite), Merkle Patricia Trie (Hesap Durumu)
 -   **Ağ:** Libp2p (Request-Response Sync, Gossipsub, Kademlia DHT)
 -   **Veritabanı:** Sled (Gömülü Key-Value Store)
--   **Konsensüs:** Pluggable PoW, PoS ve Otomatik Finalite Oylama
--   **Gözlemlenebilirlik:** Prometheus Metrikleri (Grafana uyumlu)
--   **Yönetim:** TOML tabanlı esnek konfigürasyon sistemi
+-   **Konsensüs:** Pluggable PoW, PoS ve aşamalı BLS/PQ finalite alt sistemi
+-   **Gözlemlenebilirlik:** Runtime bağlantıları geliştirilmekte olan Prometheus formatlı metrics endpoint'i
+-   **Yönetim:** Rol ve Mainnet güvenlik kuralları içeren katı TOML Config V2
 
 ---
 
@@ -63,6 +63,9 @@ Yeni **Katmanlı Modüler Mimari** ve dosya düzeni.
 
 ### 11. [Bölüm 11: Çoklu Konsensüs Yerleşim ve Bizans Dayanıklılığı](ch11_multi_consensus_settlement.md)
 **Model B: Buffered Registry** mimarisi, ağ bölünmeleri ve Bizans saldırılarına karşı deterministik küresel uzlaşı kanıtları.
+
+### 12. [Bölüm 12: Production Hardening Durumu](ch12_production_hardening.md)
+Uygulanan korumaları, aşamalı işleri ve açık Mainnet engellerini tek yerde gösteren güncel durum bölümü.
 
 ---
 

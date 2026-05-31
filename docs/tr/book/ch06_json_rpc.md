@@ -51,7 +51,7 @@ Hazır profiller repo kökünde bulunur: `config/mainnet.toml`, `config/testnet.
 
 ## 2. Gözlemlenebilirlik: Prometheus Metrikleri
 
-Düğümün sağlığını ve performansını izlemek için `/metrics` endpoint'i üzerinden gerçek zamanlı veriler sunulur.
+Düğüm `/metrics` endpoint'i üzerinden Prometheus text formatı sunar. Metric tanımları geniştir; ancak canlı collector bağlantılarının çoğu henüz tamamlanmamıştır. Metrics server bugün parse edilen listener string'inden bağımsız olarak `0.0.0.0:{metrics_port}` adresine bağlanır.
 
 - **Varsayılan Port:** `9090`
 - **Erişim:** `http://127.0.0.1:9090/metrics`
@@ -108,7 +108,7 @@ Tüm metotlar `bud_` ön eki ile başlar. Bu, ağa özgü metotları standart ol
 | `bud_unlockBridgeTransferVerified` | `[target_domain, target_height, sequence, expected_block_hash, event, proof]` | Commit edilmiş target-domain `BridgeBurned` event Merkle proof doğrulandıktan sonra source fonları unlock eder. |
 | `bud_sealGlobalHeader` | `[]` | Güncel deterministik settlement root'larını global header içine mühürler. |
 
-## 3. Örnek Kullanım (curl)
+## 4. Örnek Kullanım (curl)
 
 **Blok Sayısını Sorgulama:**
 ```bash
@@ -152,19 +152,20 @@ curl -X POST -H "Content-Type: application/json" \
 
 Production client'lar `hash` ve `signature` alanlarını `Transaction::signing_hash` ile aynı domain separation ve `tx_type` byte'ı üzerinden üretmelidir. `ContractCall` için `amount` daima `0` olmalıdır.
 
-## 4. Mimari Tasarım ve Güvenlik (Hardening)
+## 5. Mimari Tasarım ve Güvenlik (Hardening)
 
-RPC sunucusu, asenkron bir `tokio` görevinde çalışır. **Mainnet Ready** aşamasında aşağıdaki güvenlik katmanları eklenmiştir:
+RPC sunucusu, asenkron bir `tokio` görevinde çalışır. Güncel temel güvenlik katmanları şunlardır:
 
-1. **Bağlantı Sınırı (Max Connections):** Aynı anda en fazla 100 aktif bağlantıya izin verilir. Bu, kaynak tükenmesini (resource exhaustion) önler.
-2. **Payload Sınırı (Max Request Size):** Gelen her RPC isteği en fazla **2 MB** olabilir. Çok büyük JSON paketleri ile belleği şişirme saldırıları bu sayede engelenir.
-3. **İşlem Doğrulama (TX Validation):** `bud_sendRawTransaction` metodu, işlemi ağa yaymadan önce **transaction size** (Max 100KB) ve **kriptografik imza** kontrolü yapar. Hatalı veya devasa işlemler anında reddedilir.
-4. **Panic Prevention:** Sunucu kodundaki tüm kritik noktalar `Result` tipiyle yönetilir. Bozuk bir JSON veya ağ hatası tüm düğümü çökertemez.
-5. **Config Tabanlı Auth ve Rate Limit:** TOML dosyalarındaki `auth_required`, `api_key_env`, `allowed_ips`, `cors_origins` ve `rate_limit_per_minute` alanları RPC HTTP middleware'i tarafından uygulanır. Auth için `x-api-key` veya `Authorization: Bearer ...` header'ı kabul edilir.
-6. **ContractCall Shape Kontrolü:** `bud_txPrecheck` ve mempool doğrulaması, BudZKVM bytecode'unun boş olmamasını ve 8 byte instruction hizasına sahip olmasını kontrol eder.
-7. **Verified Settlement Zorunluluğu:** Raw domain commitment, bridge burn ve bridge unlock çağrıları RPC üzerinden reddedilir. Settlement state'i değiştiren bridge dönüş yolu commit edilmiş domain event'i ve Merkle proof ister.
+1. **İşlem Doğrulama (TX Validation):** `bud_sendRawTransaction`, işlemi yaymadan önce transaction size (maksimum 100 KiB) ve kriptografik imza kontrolü yapar.
+2. **Config Tabanlı Auth ve Rate Limit:** `auth_required`, `api_key_env`, `allowed_ips`, `cors_origins` ve `rate_limit_per_minute` alanları HTTP middleware tarafından uygulanır. Auth için `x-api-key` veya `Authorization: Bearer ...` kabul edilir.
+3. **ContractCall Shape Kontrolü:** `bud_txPrecheck` ve mempool doğrulaması boş veya 8 byte hizasına uymayan BudZKVM bytecode'unu reddeder.
+4. **Verified Settlement Zorunluluğu:** Raw domain commitment, bridge burn ve bridge unlock çağrıları RPC üzerinden reddedilir.
 
-## 5. `bud_txPrecheck` Ne Kadar Gerçekçi?
+## 5.1 Mainnet Sınırları
+
+Config V2 `public_listener`, `operator_listener` ve `trusted_proxies` alanlarını parse eder; runtime bugün tek HTTP RPC listener başlatır. Allowed-IP kontrolü `x-forwarded-for` veya `x-real-ip` header'ına doğrudan güvenir. Ayrı public/operator sunucuları, trusted-proxy zorlaması, istemci bazlı quota, health endpoint'leri ve açık connection/body limitleri Mainnet işidir.
+
+## 6. `bud_txPrecheck` Ne Kadar Gerçekçi?
 
 Budlum'un güncel `bud_txPrecheck` implementasyonu artık sadece kaba bir "imza ve bakiye" kontrolü değildir. İstek, doğrudan `ChainActor` üzerinden zincirin gerçek state'ine ve mempool bağlamına sorulur.
 

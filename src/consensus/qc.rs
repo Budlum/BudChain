@@ -165,7 +165,7 @@ impl QcBlob {
         let mut idx = leaf_index;
 
         for layer in layers.iter().take(layers.len().saturating_sub(1)) {
-            let sibling_idx = if idx % 2 == 0 {
+            let sibling_idx = if idx.is_multiple_of(2) {
                 (idx + 1).min(layer.len().saturating_sub(1))
             } else {
                 idx.saturating_sub(1)
@@ -395,6 +395,7 @@ impl QcFaultProof {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn invalid_dilithium_fields(&self) -> Option<(&Vec<u8>, &Vec<Vec<u8>>, u32)> {
         match &self.kind {
             QcProofKind::InvalidDilithiumV1 {
@@ -422,11 +423,11 @@ impl QcFaultProof {
         for proof_element in merkle_proof {
             let mut hasher = Sha3_256::new();
             if idx % 2 == 0 {
-                hasher.update(&current);
+                hasher.update(current);
                 hasher.update(proof_element);
             } else {
                 hasher.update(proof_element);
-                hasher.update(&current);
+                hasher.update(current);
             }
             let result = hasher.finalize();
             current.copy_from_slice(&result);

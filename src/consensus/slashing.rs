@@ -58,6 +58,7 @@ impl SlashingEvidence {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn double_proposal(
         validator: String,
         epoch: u64,

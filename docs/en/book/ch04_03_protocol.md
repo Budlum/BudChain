@@ -10,7 +10,7 @@ Budlum nodes use a custom `NetworkMessage` protocol for peer-to-peer communicati
 
 ## What Does `NetworkMessage` Include?
 
-1.  **Handshake / HandshakeAck:** new peers verify version and `chain_id`. Hardening Phase 2 also verifies `validator_set_hash` and `supported_schemes`.
+1.  **Handshake / HandshakeAck:** new peers verify version and `chain_id`. `validator_set_hash` and `supported_schemes` are exchanged and logged, but enforcement policy is still pending.
 2.  **Block:** broadcasts a newly produced block.
 3.  **Transaction:** broadcasts new transactions.
 4.  **Prevote / Precommit:** BLS finality votes.
@@ -28,14 +28,14 @@ Budlum Core uses **Gossipsub** for broad announcements such as blocks and transa
 
 ## Request-Response Synchronization
 
-Production hardening moves large transfers, such as downloading old blocks, to one-to-one **Request-Response** sync.
+Budlum includes one-to-one **Request-Response** sync support for large historical transfers.
 
 -   **Protocol ID:** `/budlum/sync/1.0.0`
 -   **SyncCodec:** length-prefixed serialization over streams.
 -   **Actor integration:** `Node` forwards incoming requests to `ChainActor`, serving blocks and headers without global locking.
 -   **Handshake-triggered sync:** if a peer's handshake reports a higher best height, the node automatically requests headers and reports the real sync state through `bud_syncing`.
 
-This reduces network traffic because sync asks a specific peer for a specific range instead of shouting to the whole network.
+The migration is not complete: some sync flows still use Gossipsub broadcasts. Mainnet hardening must finish routing historical transfers through direct peers and bind responses to the requesting peer.
 
 ## QC Messages
 
@@ -62,3 +62,5 @@ JSON is readable but heavier. Protobuf creates smaller binary payloads and reduc
 ## 3. Limits and Security
 
 Network input is untrusted. Message size limits prevent memory exhaustion attacks, and oversized blocks or messages are rejected automatically.
+
+Current protocol constants are 10 MiB for a network message, 1 MiB for a block, 100 KiB for a transaction, 500 blocks for chain-sync batches, and 256 blocks for snapshot-sync batches.

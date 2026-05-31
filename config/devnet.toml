@@ -1,41 +1,39 @@
 [network]
-name = "devnet"
+profile = "devnet"
 chain_id = 1337
-port = 6001
+genesis_file = "./config/devnet-genesis.json"
 
-[consensus]
-type = "pow"
-min_stake = 1000
-epoch_len = 10
-
-[bootnodes]
-addresses = []
-fallback = []
-dns_seeds = []
-
-[rpc]
-enabled = true
-host = "127.0.0.1"
-port = 8545
-auth_required = false
-allowed_ips = ["127.0.0.1"]
-cors_origins = ["http://127.0.0.1", "http://localhost"]
-rate_limit_per_minute = 10000
-
-[metrics]
-port = 9090
+[node]
+role = "validator"
 
 [storage]
-db_path = "./data/devnet/budlum.db"
+data_dir = "./data/devnet/budlum.db"
 snapshot_dir = "./data/devnet/snapshots"
-backups_enabled = false
 backup_dir = "./data/devnet/backups"
+backups_enabled = false
 
-[validator]
-key_file = "./secrets/devnet-validator.key"
-backend = "local_file"
-
-[security]
+[p2p]
+identity_file = "./secrets/devnet-node-id.key"
+bootnodes = []
+dns_seeds = []
 max_peers = 25
 banned_peer_db = "./data/devnet/banned-peers.json"
 mdns_enabled = true
+
+[rpc]
+public_listener = "127.0.0.1:8545"
+operator_listener = "127.0.0.1:8546"
+trusted_proxies = ["127.0.0.1"]
+enabled = true
+
+[metrics]
+listener = "127.0.0.1:9090"
+
+[validator]
+key_file = "./secrets/devnet-validator.key"
+backend = "local"
+
+[features]
+governance = false
+zkvm_contracts = false
+pruning = false

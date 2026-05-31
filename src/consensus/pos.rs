@@ -69,6 +69,7 @@ use crate::crypto::primitives::ValidatorKeys;
 use std::sync::RwLock;
 use tracing::{info, warn};
 
+#[allow(clippy::type_complexity)]
 pub struct PoSEngine {
     pub config: PoSConfig,
     seen_blocks: RwLock<HashMap<(Address, u64), (BlockHeader, Vec<u8>)>>,
@@ -208,9 +209,9 @@ impl PoSEngine {
         y < threshold
     }
     pub fn is_validator(&self, pubkey: &Address, state: &AccountState) -> bool {
-        state.get_validator(pubkey).map_or(false, |v| {
-            v.active && !v.slashed && v.stake >= self.config.min_stake
-        })
+        state
+            .get_validator(pubkey)
+            .is_some_and(|v| v.active && !v.slashed && v.stake >= self.config.min_stake)
     }
     #[allow(dead_code)]
     fn calculate_reward(&self, validator_stake: u64) -> u64 {
@@ -550,7 +551,7 @@ impl ConsensusEngine for PoSEngine {
             .ok_or(ConsensusError("Block has no producer".into()))?;
         let header = BlockHeader::from_block(block);
         let signature = block.signature.clone().unwrap_or_default();
-        let key = (producer.clone(), header.index);
+        let key = (*producer, header.index);
 
         if let Some(store) = storage {
             let _ = store.save_seen_block(&header, &signature);
@@ -592,7 +593,7 @@ impl ConsensusEngine for PoSEngine {
             }
         } else {
             seen_blocks.insert(key, (header, signature));
-            if block.index > 0 && block.index % self.config.epoch_length == 0 {
+            if block.index > 0 && block.index.is_multiple_of(self.config.epoch_length) {
                 if let Ok(mut seed) = self.epoch_seed.write() {
                     *seed = [0u8; 32];
                 }

@@ -37,14 +37,19 @@ Sled has keys and values, not tables. Budlum uses prefixes to keep data organize
 | Canonical Height | `CANONICAL_HEIGHT` | Track canonical chain height. |
 | Last Block | `LAST` | Point to the current tip. |
 | Schema Version | `SCHEMA_VERSION` | Track migration level. |
+| Commit Marker | `IN_PROGRESS_HEIGHT` | Detect and roll back an interrupted canonical commit. |
 
 Values are written with binary serialization for compactness and speed. Legacy JSON reads are still tolerated during migration so existing research databases can be opened.
 
 ## 3. Code Analysis
 
-### Function: `commit_block`
+### Function: `commit_durable_batch`
 
-Block commits are atomic. The block, height index, state root, transaction indexes, and finality metadata are written in one batch so crashes do not leave half-written canonical data.
+The canonical chain path builds a `DurableCommitBatch`. It writes an `IN_PROGRESS_HEIGHT` marker and flushes it before applying the atomic Sled batch. The batch includes the block, height and transaction indexes, tip metadata, state root, optional finality certificate, global headers, bridge state, and changed accounts. The marker is removed inside the same batch.
+
+`Storage::new` calls `recover_interrupted_commit`. If a previous process stopped after placing the marker, startup removes height-local indexes and restores the previous tip before continuing.
+
+The older `commit_block` helper still exists for compatibility. New canonical chain changes should use `commit_durable_batch`.
 
 ### Function: `save_domain_commitment_batch`
 
@@ -65,3 +70,7 @@ Reorgs update not only block bodies but also canonical metadata: height indexes,
 ## 6. Migrations and Snapshot Export
 
 `Storage::new` runs migrations on startup and writes `SCHEMA_VERSION = 1`. Snapshot export can dump Sled key-value pairs as JSON for backup and recovery workflows, while runtime storage paths prefer binary values.
+
+## 7. Remaining Production Work
+
+The durable batch is an important crash-consistency improvement, not a complete database design freeze. A production archive format still needs an explicit persisted `ConsensusStateV2` envelope for validator, unbonding, and economics metadata, migration tests across released schema versions, backup restore drills, and storage fault injection.

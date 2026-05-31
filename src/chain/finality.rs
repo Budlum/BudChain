@@ -63,7 +63,7 @@ impl ValidatorSetSnapshot {
     }
 
     pub fn quorum_stake(&self) -> u64 {
-        (self.total_stake * FINALITY_QUORUM_NUMERATOR) / FINALITY_QUORUM_DENOMINATOR
+        (self.total_stake * FINALITY_QUORUM_NUMERATOR) / FINALITY_QUORUM_DENOMINATOR + 1
     }
 }
 
@@ -113,7 +113,7 @@ impl Precommit {
 }
 
 pub fn is_checkpoint_height(height: u64) -> bool {
-    height > 0 && height % FINALITY_CHECKPOINT_INTERVAL == 0
+    height > 0 && height.is_multiple_of(FINALITY_CHECKPOINT_INTERVAL)
 }
 
 pub fn checkpoint_signing_message(epoch: u64, height: u64, hash: &str) -> Vec<u8> {
@@ -177,7 +177,7 @@ pub fn verify_pop(entry: &ValidatorEntry) -> bool {
     let g2_gen_neg = -G2Affine::generator();
     let pairing_result = bls12_381::multi_miller_loop(&[
         (&sig_affine.unwrap(), &g2_gen_neg.into()),
-        (&h_msg.into(), &pk_affine.unwrap().into()),
+        (&h_msg, &pk_affine.unwrap().into()),
     ])
     .final_exponentiation();
 
@@ -235,7 +235,7 @@ impl FinalityAggregator {
             return Err("Duplicate prevote".into());
         }
 
-        self.prevotes.insert(vote.voter_id.clone(), vote);
+        self.prevotes.insert(vote.voter_id, vote);
         self.check_prevote_quorum();
         Ok(())
     }
@@ -265,7 +265,7 @@ impl FinalityAggregator {
             return Err("Duplicate precommit".into());
         }
 
-        self.precommits.insert(vote.voter_id.clone(), vote);
+        self.precommits.insert(vote.voter_id, vote);
         self.check_precommit_quorum();
         Ok(())
     }
@@ -305,7 +305,7 @@ impl FinalityAggregator {
 
         let snapshot = self.validator_snapshot.as_ref()?;
 
-        let mut bitmap = vec![0u8; (snapshot.validators.len() + 7) / 8];
+        let mut bitmap = vec![0u8; snapshot.validators.len().div_ceil(8)];
         let mut agg_sig = G1Projective::identity();
 
         for (addr, precommit) in &self.precommits {
@@ -414,7 +414,7 @@ impl FinalityCert {
 
         let pairing_result = bls12_381::multi_miller_loop(&[
             (&sig_affine.unwrap(), &g2_gen_neg.into()),
-            (&h_msg.into(), &agg_pk_affine.into()),
+            (&h_msg, &agg_pk_affine.into()),
         ])
         .final_exponentiation();
 
@@ -504,7 +504,7 @@ mod tests {
     fn test_validator_set_snapshot() {
         let (snap, _) = make_snapshot_with_keys(4, 1000);
         assert_eq!(snap.total_stake, 4000);
-        assert_eq!(snap.quorum_stake(), 2666);
+        assert_eq!(snap.quorum_stake(), 2667);
     }
 
     #[test]
@@ -623,7 +623,7 @@ mod tests {
                 epoch: 1,
                 checkpoint_height: 10,
                 checkpoint_hash: "cp_hash".into(),
-                voter_id: snap.validators[i].address.clone(),
+                voter_id: snap.validators[i].address,
                 sig_bls: vec![],
             };
             agg.add_prevote(vote).unwrap();
@@ -631,16 +631,16 @@ mod tests {
         assert!(agg.prevote_quorum_reached);
 
         let mut agg_sig = G1Projective::identity();
-        for i in 0..3 {
+        for (i, sk) in sks.iter().enumerate().take(3) {
             let pc = Precommit {
                 epoch: 1,
                 checkpoint_height: 10,
                 checkpoint_hash: "cp_hash".into(),
-                voter_id: snap.validators[i].address.clone(),
+                voter_id: snap.validators[i].address,
                 sig_bls: vec![],
             };
 
-            let sig_bytes = sign_msg(sks[i], &pc.signing_message());
+            let sig_bytes = sign_msg(*sk, &pc.signing_message());
             let mut pc_signed = pc;
             pc_signed.sig_bls = sig_bytes.clone();
 
@@ -670,7 +670,7 @@ mod tests {
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: "cp_hash".into(),
-            voter_id: snap.validators[0].address.clone(),
+            voter_id: snap.validators[0].address,
             sig_bls: vec![],
         };
         let sig_bytes = sign_msg(sks[0], &pc.signing_message());

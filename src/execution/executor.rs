@@ -105,67 +105,60 @@ impl Executor {
                         }
                         tracing::info!("Validator Vote recorded: {} -> {}", tx.from, tx.to);
                     }
-                } else if !tx.data.is_empty() {
-                    if tx.data.len() >= 9 {
-                        if tx.data.len() == 9 {
-                            let vote_for = tx.data[0] != 0;
-                            let mut id_bytes = [0u8; 8];
-                            id_bytes.copy_from_slice(&tx.data[1..9]);
-                            let proposal_id = u64::from_le_bytes(id_bytes);
+                } else if !tx.data.is_empty() && tx.data.len() >= 9 {
+                    if tx.data.len() == 9 {
+                        let vote_for = tx.data[0] != 0;
+                        let mut id_bytes = [0u8; 8];
+                        id_bytes.copy_from_slice(&tx.data[1..9]);
+                        let proposal_id = u64::from_le_bytes(id_bytes);
 
-                            let voter_stake =
-                                state.get_validator(&tx.from).map(|v| v.stake).unwrap_or(0);
-                            if voter_stake == 0 {
-                                return Err(BudlumError::validation(
-                                    "governance_voter_not_validator",
-                                    "Only validators can vote in governance",
-                                ));
-                            }
+                        let voter_stake =
+                            state.get_validator(&tx.from).map(|v| v.stake).unwrap_or(0);
+                        if voter_stake == 0 {
+                            return Err(BudlumError::validation(
+                                "governance_voter_not_validator",
+                                "Only validators can vote in governance",
+                            ));
+                        }
 
-                            if let Some(proposal) = state.governance.find_proposal_mut(proposal_id)
-                            {
-                                proposal
-                                    .add_vote(tx.from, voter_stake, vote_for)
-                                    .map_err(|e| {
-                                        BudlumError::validation("governance_vote_failed", e)
-                                    })?;
-                                tracing::info!(
-                                    "Governance Vote: Proposal {} from {}",
-                                    proposal_id,
-                                    tx.from
-                                );
-                            } else {
-                                return Err(BudlumError::validation(
-                                    "proposal_not_found",
-                                    "Proposal not found",
-                                ));
-                            }
-                        } else {
-                            // Likely a Proposal: [duration (8), ProposalType (...)]
-                            let mut dur_bytes = [0u8; 8];
-                            dur_bytes.copy_from_slice(&tx.data[0..8]);
-                            let duration = u64::from_le_bytes(dur_bytes);
-
-                            let p_type: crate::core::governance::ProposalType =
-                                serde_json::from_slice(&tx.data[8..]).map_err(|e| {
-                                    BudlumError::validation(
-                                        "invalid_proposal_data",
-                                        format!("Invalid proposal data: {}", e),
-                                    )
+                        if let Some(proposal) = state.governance.find_proposal_mut(proposal_id) {
+                            proposal
+                                .add_vote(tx.from, voter_stake, vote_for)
+                                .map_err(|e| {
+                                    BudlumError::validation("governance_vote_failed", e)
                                 })?;
-
-                            let id = state.governance.create_proposal(
-                                tx.from,
-                                p_type,
-                                state.epoch_index,
-                                duration,
-                            );
                             tracing::info!(
-                                "Governance Proposal Created: ID {} from {}",
-                                id,
+                                "Governance Vote: Proposal {} from {}",
+                                proposal_id,
                                 tx.from
                             );
+                        } else {
+                            return Err(BudlumError::validation(
+                                "proposal_not_found",
+                                "Proposal not found",
+                            ));
                         }
+                    } else {
+                        // Likely a Proposal: [duration (8), ProposalType (...)]
+                        let mut dur_bytes = [0u8; 8];
+                        dur_bytes.copy_from_slice(&tx.data[0..8]);
+                        let duration = u64::from_le_bytes(dur_bytes);
+
+                        let p_type: crate::core::governance::ProposalType =
+                            serde_json::from_slice(&tx.data[8..]).map_err(|e| {
+                                BudlumError::validation(
+                                    "invalid_proposal_data",
+                                    format!("Invalid proposal data: {}", e),
+                                )
+                            })?;
+
+                        let id = state.governance.create_proposal(
+                            tx.from,
+                            p_type,
+                            state.epoch_index,
+                            duration,
+                        );
+                        tracing::info!("Governance Proposal Created: ID {} from {}", id, tx.from);
                     }
                 }
             }

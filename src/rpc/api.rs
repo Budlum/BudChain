@@ -1,8 +1,11 @@
+#![allow(clippy::too_many_arguments)]
+
 use crate::core::transaction::Transaction;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::error::ErrorObjectOwned;
 
 #[rpc(server)]
+#[allow(clippy::too_many_arguments)]
 pub trait BudlumApi {
     #[method(name = "bud_chainId")]
     async fn chain_id(&self) -> Result<String, ErrorObjectOwned>;
@@ -103,6 +106,7 @@ pub trait BudlumApi {
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     #[method(name = "bud_lockBridgeTransfer")]
+    #[allow(clippy::too_many_arguments)]
     async fn lock_bridge_transfer(
         &self,
         source_domain: crate::domain::DomainId,

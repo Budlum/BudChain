@@ -105,11 +105,15 @@ impl DomainEventTree {
         let mut siblings = Vec::new();
 
         while level.len() > 1 {
-            let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
+            let sibling_idx = if idx.is_multiple_of(2) {
+                idx + 1
+            } else {
+                idx - 1
+            };
             let sibling = level.get(sibling_idx).copied().unwrap_or(level[idx]);
             siblings.push(sibling);
 
-            let mut next = Vec::with_capacity((level.len() + 1) / 2);
+            let mut next = Vec::with_capacity(level.len().div_ceil(2));
             for pair in level.chunks(2) {
                 let left = pair[0];
                 let right = if pair.len() == 2 { pair[1] } else { pair[0] };
@@ -133,7 +137,7 @@ impl MerkleProof {
         let mut index = self.index;
 
         for sibling in &self.siblings {
-            hash = if index % 2 == 0 {
+            hash = if index.is_multiple_of(2) {
                 hash_fields_bytes(&[b"BDLM_MERKLE_NODE_V1", &hash, sibling])
             } else {
                 hash_fields_bytes(&[b"BDLM_MERKLE_NODE_V1", sibling, &hash])

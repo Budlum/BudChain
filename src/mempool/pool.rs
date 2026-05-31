@@ -75,10 +75,8 @@ impl Mempool {
             return Err(MempoolError::FeeTooLow);
         }
 
-        if self.transactions.len() >= self.config.max_size {
-            if !self.evict_lowest_fee(&tx) {
-                return Err(MempoolError::PoolFull);
-            }
+        if self.transactions.len() >= self.config.max_size && !self.evict_lowest_fee(&tx) {
+            return Err(MempoolError::PoolFull);
         }
 
         let sender_count = self.by_sender.get(&tx.from).map(|v| v.len()).unwrap_or(0);
@@ -105,11 +103,11 @@ impl Mempool {
 
         self.by_sender
             .entry(tx.from)
-            .or_insert_with(BTreeMap::new)
+            .or_default()
             .insert(tx.nonce, tx.hash.clone());
         self.by_fee
             .entry(tx.fee)
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(tx.hash.clone());
 
         self.transactions
@@ -330,8 +328,10 @@ mod tests {
 
     #[test]
     fn test_cleanup_expired() {
-        let mut config = MempoolConfig::default();
-        config.tx_ttl_secs = 1;
+        let config = MempoolConfig {
+            tx_ttl_secs: 1,
+            ..Default::default()
+        };
         let mut pool = Mempool::new(config);
 
         let tx = create_test_tx(&"01".repeat(32), 0, 10);

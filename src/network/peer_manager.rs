@@ -92,6 +92,12 @@ impl PeerScore {
 pub struct PeerManager {
     peers: HashMap<PeerId, PeerScore>,
 }
+impl Default for PeerManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PeerManager {
     pub fn new() -> Self {
         PeerManager {
@@ -99,7 +105,7 @@ impl PeerManager {
         }
     }
     fn get_or_create(&mut self, peer_id: &PeerId) -> &mut PeerScore {
-        self.peers.entry(*peer_id).or_insert_with(PeerScore::new)
+        self.peers.entry(*peer_id).or_default()
     }
     pub fn check_rate_limit(&mut self, peer_id: &PeerId) -> bool {
         let score = self.get_or_create(peer_id);
@@ -140,7 +146,7 @@ impl PeerManager {
     pub fn report_invalid_block(&mut self, peer_id: &PeerId) {
         let score = self.get_or_create(peer_id);
         score.invalid_blocks += 1;
-        score.score = score.score + INVALID_BLOCK_PENALTY;
+        score.score += INVALID_BLOCK_PENALTY;
         score.last_seen = Some(Instant::now());
         if score.score <= BAN_THRESHOLD {
             self.ban_peer(peer_id);
@@ -149,7 +155,7 @@ impl PeerManager {
     pub fn report_invalid_tx(&mut self, peer_id: &PeerId) {
         let score = self.get_or_create(peer_id);
         score.invalid_txs += 1;
-        score.score = score.score + INVALID_TX_PENALTY;
+        score.score += INVALID_TX_PENALTY;
         score.last_seen = Some(Instant::now());
         if score.score <= BAN_THRESHOLD {
             self.ban_peer(peer_id);
@@ -157,7 +163,7 @@ impl PeerManager {
     }
     pub fn report_oversized_message(&mut self, peer_id: &PeerId) {
         let score = self.get_or_create(peer_id);
-        score.score = score.score + OVERSIZED_MESSAGE_PENALTY;
+        score.score += OVERSIZED_MESSAGE_PENALTY;
         score.last_seen = Some(Instant::now());
         if score.score <= BAN_THRESHOLD {
             self.ban_peer(peer_id);

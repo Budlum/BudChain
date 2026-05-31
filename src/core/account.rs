@@ -105,6 +105,10 @@ pub struct AccountState {
     cached_leaves: Vec<[u8; 32]>,
     cached_keys: Vec<Address>,
     cached_tree: Vec<Vec<[u8; 32]>>,
+    pub bridge_root: [u8; 32],
+    pub message_root: [u8; 32],
+    pub settlement_root: [u8; 32],
+    pub global_header_summary: [u8; 32],
 }
 impl AccountState {
     pub fn new() -> Self {
@@ -123,6 +127,10 @@ impl AccountState {
             cached_leaves: Vec::new(),
             cached_keys: Vec::new(),
             cached_tree: Vec::new(),
+            bridge_root: [0u8; 32],
+            message_root: [0u8; 32],
+            settlement_root: [0u8; 32],
+            global_header_summary: [0u8; 32],
         }
     }
     pub fn with_storage(storage: Storage) -> Self {
@@ -141,6 +149,10 @@ impl AccountState {
             cached_leaves: Vec::new(),
             cached_keys: Vec::new(),
             cached_tree: Vec::new(),
+            bridge_root: [0u8; 32],
+            message_root: [0u8; 32],
+            settlement_root: [0u8; 32],
+            global_header_summary: [0u8; 32],
         };
         if let Err(e) = state.load_from_storage() {
             tracing::error!("Could not load account state: {}", e);
@@ -174,6 +186,10 @@ impl AccountState {
             cached_leaves: Vec::new(),
             cached_keys: Vec::new(),
             cached_tree: Vec::new(),
+            bridge_root: [0u8; 32],
+            message_root: [0u8; 32],
+            settlement_root: [0u8; 32],
+            global_header_summary: [0u8; 32],
         }
     }
 
@@ -300,7 +316,7 @@ impl AccountState {
                 if tx.amount != 0 {
                     return Err("Contract call amount must be 0".into());
                 }
-                if tx.data.is_empty() || tx.data.len() % 8 != 0 {
+                if tx.data.is_empty() || !tx.data.len().is_multiple_of(8) {
                     return Err("Contract call data must be non-empty BudZKVM bytecode".into());
                 }
             }
@@ -527,7 +543,7 @@ impl AccountState {
                 .par_iter()
                 .map(|(pubkey, account)| {
                     let mut h = Sha256::new();
-                    h.update(&[0x00]);
+                    h.update([0x00]);
                     h.update(pubkey.0);
                     h.update(account.balance.to_le_bytes());
                     h.update(account.nonce.to_le_bytes());
@@ -546,7 +562,7 @@ impl AccountState {
                         let left = &chunk[0];
                         let right = if chunk.len() > 1 { &chunk[1] } else { left };
                         let mut h = Sha256::new();
-                        h.update(&[0x01]);
+                        h.update([0x01]);
                         h.update(left);
                         h.update(right);
                         h.finalize().into()
@@ -563,7 +579,7 @@ impl AccountState {
                 if let Ok(pos) = self.cached_keys.binary_search(dirty_key) {
                     if let Some(account) = self.accounts.get(dirty_key) {
                         let mut h = Sha256::new();
-                        h.update(&[0x00]);
+                        h.update([0x00]);
                         h.update(dirty_key.0);
                         h.update(account.balance.to_le_bytes());
                         h.update(account.nonce.to_le_bytes());
@@ -596,9 +612,9 @@ impl AccountState {
 
                 for (parent_idx, (left_idx, right_idx)) in parent_to_children {
                     let mut h = Sha256::new();
-                    h.update(&[0x01]);
-                    h.update(&self.cached_tree[level_idx][left_idx]);
-                    h.update(&self.cached_tree[level_idx][right_idx]);
+                    h.update([0x01]);
+                    h.update(self.cached_tree[level_idx][left_idx]);
+                    h.update(self.cached_tree[level_idx][right_idx]);
 
                     self.cached_tree[level_idx + 1][parent_idx] = h.finalize().into();
                     next_affected.insert(parent_idx);
@@ -608,7 +624,82 @@ impl AccountState {
         }
 
         self.dirty_accounts.clear();
-        hex::encode(self.cached_tree.last().unwrap()[0])
+        let accounts_root_bytes = if self.cached_tree.is_empty() {
+            [0u8; 32]
+        } else {
+            self.cached_tree.last().unwrap()[0]
+        };
+
+        // ConsensusStateV2 Root Hashing
+        let mut validator_hashes = Vec::new();
+        for (addr, val) in &self.validators {
+            let mut h = Sha256::new();
+            h.update(addr.0);
+            h.update(val.stake.to_le_bytes());
+            h.update([val.active as u8]);
+            h.update([val.slashed as u8]);
+            h.update([val.jailed as u8]);
+            h.update(val.jail_until.to_le_bytes());
+            h.update(val.last_proposed_block.unwrap_or(0).to_le_bytes());
+            h.update(val.votes_for.to_le_bytes());
+            h.update(val.votes_against.to_le_bytes());
+            h.update(&val.vrf_public_key);
+            h.update(&val.bls_public_key);
+            h.update(&val.pop_signature);
+            h.update(&val.pq_public_key);
+            validator_hashes.push(h.finalize());
+        }
+        let validators_root = if validator_hashes.is_empty() {
+            [0u8; 32]
+        } else {
+            let mut combined = Sha256::new();
+            for hash in validator_hashes {
+                combined.update(hash);
+            }
+            combined.finalize().into()
+        };
+
+        let mut unbonding_entries = self.unbonding_queue.clone();
+        unbonding_entries.sort_by(|a, b| {
+            a.address
+                .0
+                .cmp(&b.address.0)
+                .then(a.release_epoch.cmp(&b.release_epoch))
+        });
+        let mut unbonding_hashes = Vec::new();
+        for entry in unbonding_entries {
+            let mut h = Sha256::new();
+            h.update(entry.address.0);
+            h.update(entry.amount.to_le_bytes());
+            h.update(entry.release_epoch.to_le_bytes());
+            unbonding_hashes.push(h.finalize());
+        }
+        let unbonding_root = if unbonding_hashes.is_empty() {
+            [0u8; 32]
+        } else {
+            let mut combined = Sha256::new();
+            for hash in unbonding_hashes {
+                combined.update(hash);
+            }
+            combined.finalize().into()
+        };
+
+        let mut final_hasher = Sha256::new();
+        final_hasher.update(b"v2");
+        final_hasher.update(self.epoch_index.to_le_bytes());
+        final_hasher.update(accounts_root_bytes);
+        final_hasher.update(validators_root);
+        final_hasher.update(unbonding_root);
+        final_hasher.update(self.base_fee.to_le_bytes());
+        final_hasher.update(self.block_reward.to_le_bytes());
+        final_hasher.update(self.bridge_root);
+        final_hasher.update(self.message_root);
+        final_hasher.update(self.settlement_root);
+        final_hasher.update(self.global_header_summary);
+        final_hasher.update(b"gov_disabled"); // governance version/enabled flags
+
+        let final_root = final_hasher.finalize();
+        hex::encode(final_root)
     }
     pub fn clear_dirty(&mut self) {
         self.dirty_accounts.clear();

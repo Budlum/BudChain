@@ -572,14 +572,9 @@ mod chaos_tests {
             block_pow.state_root = format!("pow_state_{}", i).repeat(32)[0..64].to_string();
             block_pow.tx_root = block_pow.calculate_tx_root();
             block_pow.hash = block_pow.calculate_hash();
-            let mut pow_com = DomainCommitment::from_block(
-                &pow_domain,
-                &block_pow,
-                [1u8; 32],
-                [2u8; 32],
-                i as u64,
-            )
-            .unwrap();
+            let mut pow_com =
+                DomainCommitment::from_block(&pow_domain, &block_pow, [1u8; 32], [2u8; 32], i)
+                    .unwrap();
             let pow_proof = FinalityProof::PoW {
                 confirmations: 10,
                 total_work_hint: 1000 + (i as u128),
@@ -591,26 +586,21 @@ mod chaos_tests {
             block_pos.state_root = format!("pos_state_{}", i).repeat(32)[0..64].to_string();
             block_pos.tx_root = block_pos.calculate_tx_root();
             block_pos.hash = block_pos.calculate_hash();
-            let mut pos_com = DomainCommitment::from_block(
-                &pos_domain,
-                &block_pos,
-                [3u8; 32],
-                [4u8; 32],
-                i as u64,
-            )
-            .unwrap();
+            let mut pos_com =
+                DomainCommitment::from_block(&pos_domain, &block_pos, [3u8; 32], [4u8; 32], i)
+                    .unwrap();
             use crate::chain::finality::{FinalityCert, ValidatorSetSnapshot};
             let pos_proof = FinalityProof::PoS {
                 cert: FinalityCert {
-                    epoch: i as u64,
-                    checkpoint_height: i as u64,
+                    epoch: i,
+                    checkpoint_height: i,
                     checkpoint_hash: format!("pos_hash_{}", i),
                     agg_sig_bls: vec![0u8; 48],
                     bitmap: vec![255],
                     set_hash: "snap_hash".to_string(),
                 },
                 validator_snapshot: ValidatorSetSnapshot {
-                    epoch: i as u64,
+                    epoch: i,
                     validators: vec![],
                     set_hash: "snap_hash".to_string(),
                     total_stake: 100,
@@ -623,14 +613,9 @@ mod chaos_tests {
             block_poa.state_root = format!("poa_state_{}", i).repeat(32)[0..64].to_string();
             block_poa.tx_root = block_poa.calculate_tx_root();
             block_poa.hash = block_poa.calculate_hash();
-            let mut poa_com = DomainCommitment::from_block(
-                &poa_domain,
-                &block_poa,
-                [5u8; 32],
-                [6u8; 32],
-                i as u64,
-            )
-            .unwrap();
+            let mut poa_com =
+                DomainCommitment::from_block(&poa_domain, &block_poa, [5u8; 32], [6u8; 32], i)
+                    .unwrap();
             let poa_proof = FinalityProof::PoA {
                 signer_count: 5,
                 validator_count: 7,

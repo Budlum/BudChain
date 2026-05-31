@@ -33,3 +33,7 @@ cargo test tests::chaos
 ## 4. Felsefe: "Fail Early, Fail Safely"
 
 Kodun her noktasında `assert!` ve `Result` tipleri yoğun kullanılarak, bir hata durumunda sistemin "tutarsız bir duruma" (Corrupted state) girmek yerine güvenli bir şekilde durması (Panic/Error) hedeflenmiştir.
+
+## 5. Güncel Doğrulama Tabanı
+
+Workspace bugün `282` Rust testini geçirir. Yeni hardening testleri durable-commit rollback recovery, Snapshot V2 serialization, sayısal snapshot sıralaması, bozuk snapshot karantinası, config parsing ve RPC security middleware davranışını kapsar. CI ayrıca format, `cargo check`, warning'leri hata sayan Clippy, workspace testleri ve locked release build çalıştırır.

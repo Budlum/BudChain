@@ -70,8 +70,8 @@ async fn main() {
     // 3. Measure INGEST TPS (Mempool Internal Throughput)
     println!("Starting Ingestion (Internal Channel)...");
     let start_ingest = Instant::now();
-    let mut futures: FuturesUnordered<Pin<Box<dyn Future<Output = Result<(), String>> + Send>>> =
-        FuturesUnordered::new();
+    type IngestFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+    let mut futures: FuturesUnordered<IngestFuture> = FuturesUnordered::new();
     let mut tx_iter = txs.into_iter();
 
     for _ in 0..concurrency {

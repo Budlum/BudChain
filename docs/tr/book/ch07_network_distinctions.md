@@ -1,36 +1,29 @@
-# Bölüm 7: Ağ Ayrımı (Network Distinctions)
+# Bölüm 7: Ağ Ayrımı ve Katı Config V2
 
-Budlum ağları, kullanım amaçlarına göre farklı parametrelerle çalışır. `mainnet`, `testnet` ve `devnet` olmak üzere üç ana ağ tipi desteklenir.
+Budlum Mainnet, Testnet ve Devnet profillerini ayırır. Amaç chain kimliği, peer'lar, genesis dosyaları, anahtarlar ve operasyon beklentilerinin yanlışlıkla karışmasını engellemektir.
 
-## 1. Ağ Tipleri
+## 1. Yerleşik Profiller
 
-| Ağ | Amacı | Varsayılan Port | Chain ID | Bootnode'lar |
-| :--- | :--- | :--- | :--- | :--- |
-| **Mainnet** | Canlı ağ, gerçek değer üretimi. | 30303 | 1 | Sabit listelenmiş güvenilir node'lar. |
-| **Testnet** | Geliştiriciler için ücretsiz test ortamı. | 30304 | 2 | Topluluk tarafından sağlanan node'lar. |
-| **Devnet** | Yerel geliştirme ve Chaos testleri. | 5001 | 42 | Yok (genellikle manuel bağlanılır). |
+| Ağ | Chain ID | Varsayılan P2P Portu | Kullanım |
+| --- | ---: | ---: | --- |
+| Mainnet | `1` | `4001` | production hedefi |
+| Testnet | `42` | `5001` | kontrollü test ağı |
+| Devnet | `1337` | `6001` | yerel geliştirme |
 
-## 2. CLI ile Ağ Seçimi
+Yerleşik bootnode ve DNS seed listeleri bilinçli olarak boştur. Release operatörleri placeholder adres kullanmak yerine imzalı deployment konfigürasyonu hazırlamalıdır.
 
-Düğümü başlatırken `--network` bayrağı kullanılır:
+## 2. Katı Config V2
 
-```bash
-# Devnet modunda başlat (Varsayılan)
-cargo run -- --network devnet
+Repo `config/devnet.toml`, `config/testnet.toml` ve `config/mainnet.toml` örneklerini içerir. V2; `network`, `node`, `storage`, `p2p`, `rpc`, `metrics`, `validator` ve `features` bölümlerini tipli olarak parse eder. Bilinmeyen alanlar reddedilir. Önce dosya, sonra environment override uygulanır; katı runtime doğrulaması config dosyası olmadan başlatmalarda da çalışır.
 
-# Testnet modunda başlat
-cargo run -- --network testnet
-```
+Desteklenen roller `validator`, `sentry`, `seed`, `rpc` ve `archive` değerleridir. Validator, sentry ve seed rolleri public RPC başlangıcını kapatır.
 
-## 3. Yapılandırma Mantığı (`src/core/chain_config.rs`)
+## 3. Fail-Closed Kuralları
 
-Her ağın yapılandırması `ChainConfig` struct'ı içinde saklanır. Bu yapı şunları içerir:
-- **Chain ID**: EIP-155 tarzı replay protection için.
-- **Port**: P2P iletişimi için dinlenecek port.
-- **Bootnodes**: Ağa ilk girişte bağlanılacak adresler.
-- **Genesis State**: Ağın başlangıç bakiyeleri ve validatörleri.
+- Ayarlanmış chain ID seçili ağ profiliyle eşleşmelidir.
+- Mevcut veritabanı açıldığında kayıtlı genesis kimliği seçili zincirle eşleşmelidir.
+- Mainnet açık genesis ve seed/bootnode ayarı ister, mDNS kullanımını reddeder.
+- Mainnet v1 governance, BudZKVM contract ve pruning özelliklerini reddeder.
+- Mainnet validator başlangıcı PKCS#11 ayarlarını ister ve konsensüs signer adapter'ı henüz bağlı olmadığı için bilinçli olarak durur.
 
-## 4. Güvenlik ve İzolasyon
-
-- Farklı ağlar arasında **Handshake** seviyesinde kontrol yapılır. Yanlış ağdaki bir node, P2P bağlantısını kabul etmez.
-- `ChainID` sayesinde, bir ağda imzalanmış işlem diğer ağda geçersiz sayılır (Replay Protection).
+Bu kurallar koruyucu bariyerlerdir; Mainnet lansmanının hazır olduğu anlamına gelmez. Ayrıntılar için [Bölüm 12](ch12_production_hardening.md).

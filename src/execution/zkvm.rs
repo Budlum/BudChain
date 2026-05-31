@@ -20,7 +20,7 @@ impl ZkVmExecutor {
         if bytecode.is_empty() {
             return Err("Empty BudZKVM bytecode".into());
         }
-        if bytecode.len() % 8 != 0 {
+        if !bytecode.len().is_multiple_of(8) {
             return Err("BudZKVM bytecode length must be a multiple of 8 bytes".into());
         }
 

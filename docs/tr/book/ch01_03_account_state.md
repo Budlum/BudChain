@@ -88,9 +88,20 @@ pub fn calculate_state_root(&mut self) -> String {
 2. **Disk Dostu:** Sadece değişen hesaplar diske yazılır (**Per-Account Persistence**). Eskiden tüm state koca bir JSON blob'u iken, artık her hesap `ACCT:{pubkey}` anahtarıyla ayrı ayrı kaydedilir.
 3. **Merkle Proofs:** Hafif istemciler (Light Clients), tüm hesap verisini indirmeden sadece Merkle yolunu (Path) ve Root'u kullanarak bir hesabın bakiyesini kriptografik olarak doğrulayabilir.
 
-### 2. Dinamik Parametreler ve Yönetişim (Hardening)
+### 2. ConsensusStateV2 Birleşik State Root
 
-Budlum'un üretim sürümünde, ağ parametreleri artık statik kod sabitleri değil, state içinde yaşayan dinamik değişkenlerdir.
+Hesap Merkle kökü artık tek başına canonical state özeti değildir. `calculate_state_root`, hesap kökünü sürümlü bir `ConsensusStateV2` commitment'ı içine alır:
+
+- validatör state'i ve sıralanmış unbonding kuyruğu,
+- `epoch_index`, `base_fee` ve `block_reward`,
+- bridge, message, settlement ve global-header özet kökleri,
+- yönetişimin kapalı olduğunu belirten açık bir marker.
+
+Bu ayrım kritiktir: hesap bakiyeleri aynı olsa bile validatör ekonomisi veya settlement state'i farklı iki node aynı state root'u üretmemelidir.
+
+### 3. Dinamik Parametreler ve Yönetişim (Hardening)
+
+Dinamik parametre ve yönetişim kodu araştırma amacıyla state modelinde bulunur. Ancak Mainnet v1 profili `features.governance = true`, `features.zkvm_contracts = true` ve `features.pruning = true` değerlerini açıkça reddeder. Bu özellikler Mainnet için tamamlanmış kabul edilmemelidir.
 
 - **`base_fee`**: Ağdaki minimum işlem ücreti. Blok doluluğuna göre EIP-1559 benzeri bir elastik yapıyla güncellenir.
 - **`block_reward`**: Validatörlere verilen blok üretim ödülü.

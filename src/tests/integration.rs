@@ -359,10 +359,9 @@ mod integration_tests {
         blockchain.import_qc_blob(qc_blob).unwrap();
         assert_eq!(blockchain.finalized_height, 10);
         assert_eq!(blockchain.finalized_hash, checkpoint_block.hash);
-        assert!(blockchain
+        assert!(!blockchain
             .pending_finality_certs
-            .get(&cert.checkpoint_height)
-            .is_none());
+            .contains_key(&cert.checkpoint_height));
 
         let mut conflicting_block = Block::new(10, "wrong_prev".into(), vec![]);
         conflicting_block.hash = "conflicting_hash".into();
@@ -552,5 +551,29 @@ mod integration_tests {
         assert!(!validator.slashed);
         assert_eq!(validator.stake, 2_000);
         assert_eq!(blockchain.finalized_height, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Startup Chain ID mismatch!")]
+    fn test_startup_chain_id_verification_fails() {
+        use crate::storage::db::Storage;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        let storage = Storage::new(path).unwrap();
+        let mut genesis_block = Block::new(0, "0".repeat(64), vec![]);
+        genesis_block.chain_id = 100;
+        genesis_block.hash = genesis_block.calculate_hash();
+        storage.insert_block(&genesis_block).unwrap();
+        storage.save_last_hash(&genesis_block.hash).unwrap();
+        storage.save_canonical_height(0).unwrap();
+
+        drop(storage);
+
+        let consensus = Arc::new(PoAEngine::new(PoAConfig::default(), None));
+        let storage2 = Storage::new(path).unwrap();
+        let _bc = Blockchain::new(consensus, Some(storage2), 1337, None);
     }
 }

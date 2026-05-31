@@ -3,7 +3,7 @@ use crate::core::transaction::Transaction;
 use serde::{Deserialize, Serialize};
 
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
-pub const MAX_BLOCK_SIZE: usize = 1 * 1024 * 1024;
+pub const MAX_BLOCK_SIZE: usize = 1024 * 1024;
 pub const MAX_TX_SIZE: usize = 100 * 1024;
 pub const MAX_CHAIN_SYNC_BLOCKS: usize = 500;
 pub const MAX_HEADERS_PER_REQUEST: u32 = 2000;
@@ -148,7 +148,7 @@ impl NetworkMessage {
         if bytes.len() > MAX_MESSAGE_SIZE {
             return Err(MessageError::TooLarge(bytes.len()));
         }
-        Self::from_bytes(bytes).map_err(|e| MessageError::ParseError(e))
+        Self::from_bytes(bytes).map_err(MessageError::ParseError)
     }
 
     pub fn validate_block_size(block: &Block) -> Result<(), MessageError> {

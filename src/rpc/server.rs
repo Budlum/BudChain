@@ -384,92 +384,6 @@ fn text_response(status: StatusCode, body: &'static str) -> HttpResponse {
         .expect("static RPC security response is valid")
 }
 
-#[cfg(test)]
-mod security_tests {
-    use super::*;
-
-    fn request_with_headers(headers: &[(&str, &str)]) -> HttpRequest<()> {
-        let mut builder = HttpRequest::builder().uri("/");
-        for (name, value) in headers {
-            builder = builder.header(*name, *value);
-        }
-        builder.body(()).unwrap()
-    }
-
-    #[test]
-    fn auth_accepts_x_api_key_and_bearer() {
-        let config = RpcSecurityConfig {
-            auth_required: true,
-            api_key: Some("secret".to_string()),
-            ..Default::default()
-        };
-
-        assert!(is_authorized(
-            &config,
-            &request_with_headers(&[("x-api-key", "secret")])
-        ));
-        assert!(is_authorized(
-            &config,
-            &request_with_headers(&[("authorization", "Bearer secret")])
-        ));
-        assert!(!is_authorized(
-            &config,
-            &request_with_headers(&[("x-api-key", "wrong")])
-        ));
-    }
-
-    #[test]
-    fn origin_and_forwarded_ip_are_enforced_when_configured() {
-        let config = RpcSecurityConfig {
-            allowed_ips: vec!["10.0.0.1".to_string()],
-            cors_origins: vec!["https://wallet.example".to_string()],
-            ..Default::default()
-        };
-
-        let allowed = request_with_headers(&[
-            ("x-forwarded-for", "10.0.0.1"),
-            ("origin", "https://wallet.example"),
-        ]);
-        let denied_ip = request_with_headers(&[
-            ("x-forwarded-for", "10.0.0.2"),
-            ("origin", "https://wallet.example"),
-        ]);
-        let denied_origin =
-            request_with_headers(&[("x-forwarded-for", "10.0.0.1"), ("origin", "https://bad")]);
-
-        assert!(is_ip_allowed(&config, &allowed));
-        assert!(is_origin_allowed(&config, &allowed));
-        assert!(!is_ip_allowed(&config, &denied_ip));
-        assert!(!is_origin_allowed(&config, &denied_origin));
-    }
-
-    #[test]
-    fn rate_limit_uses_one_minute_window() {
-        let config = RpcSecurityConfig {
-            rate_limit_per_minute: Some(2),
-            ..Default::default()
-        };
-        let window = Arc::new(Mutex::new(VecDeque::new()));
-
-        assert!(is_rate_limited(&config, &window));
-        assert!(is_rate_limited(&config, &window));
-        assert!(!is_rate_limited(&config, &window));
-    }
-
-    #[test]
-    fn required_auth_requires_env_key() {
-        let result = RpcSecurityConfig::from_env(
-            true,
-            Some("BUDLUM_TEST_MISSING_RPC_KEY"),
-            Vec::new(),
-            Vec::new(),
-            None,
-        );
-
-        assert!(result.is_err());
-    }
-}
-
 #[jsonrpsee::core::async_trait]
 impl BudlumApiServer for RpcServer {
     async fn chain_id(&self) -> Result<String, ErrorObjectOwned> {
@@ -493,11 +407,7 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn get_block_by_hash(&self, hash: String) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let clean_hash = if hash.starts_with("0x") {
-            &hash[2..]
-        } else {
-            &hash
-        };
+        let clean_hash = hash.strip_prefix("0x").unwrap_or(&hash);
         match self.chain.get_block_by_hash(clean_hash.to_string()).await {
             Some(b) => Ok(Self::block_to_json(b)),
             None => Ok(serde_json::Value::Null),
@@ -505,11 +415,7 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn get_balance(&self, address: String) -> Result<String, ErrorObjectOwned> {
-        let clean_addr = if address.starts_with("0x") {
-            &address[2..]
-        } else {
-            &address
-        };
+        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
         let addr = Address::from_hex(clean_addr).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid address: {}", e), None::<()>)
         })?;
@@ -518,11 +424,7 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn get_nonce(&self, address: String) -> Result<String, ErrorObjectOwned> {
-        let clean_addr = if address.starts_with("0x") {
-            &address[2..]
-        } else {
-            &address
-        };
+        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
         let addr = Address::from_hex(clean_addr).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid address: {}", e), None::<()>)
         })?;
@@ -560,11 +462,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         hash: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let clean_hash = if hash.starts_with("0x") {
-            &hash[2..]
-        } else {
-            &hash
-        };
+        let clean_hash = hash.strip_prefix("0x").unwrap_or(&hash);
         match self
             .chain
             .get_transaction_by_hash(clean_hash.to_string())
@@ -579,11 +477,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         hash: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let clean_hash = if hash.starts_with("0x") {
-            &hash[2..]
-        } else {
-            &hash
-        };
+        let clean_hash = hash.strip_prefix("0x").unwrap_or(&hash);
         match self.chain.get_tx_receipt(clean_hash.to_string()).await {
             Some(receipt) => Ok(receipt),
             None => Ok(serde_json::Value::Null),
@@ -770,6 +664,7 @@ impl BudlumApiServer for RpcServer {
         Ok(self.bridge_roots_json("registered").await)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn lock_bridge_transfer(
         &self,
         source_domain: crate::domain::DomainId,
@@ -944,5 +839,91 @@ impl BudlumApiServer for RpcServer {
             )
         })?;
         Ok(Self::global_header_to_json(header))
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    fn request_with_headers(headers: &[(&str, &str)]) -> HttpRequest<()> {
+        let mut builder = HttpRequest::builder().uri("/");
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        builder.body(()).unwrap()
+    }
+
+    #[test]
+    fn auth_accepts_x_api_key_and_bearer() {
+        let config = RpcSecurityConfig {
+            auth_required: true,
+            api_key: Some("secret".to_string()),
+            ..Default::default()
+        };
+
+        assert!(is_authorized(
+            &config,
+            &request_with_headers(&[("x-api-key", "secret")])
+        ));
+        assert!(is_authorized(
+            &config,
+            &request_with_headers(&[("authorization", "Bearer secret")])
+        ));
+        assert!(!is_authorized(
+            &config,
+            &request_with_headers(&[("x-api-key", "wrong")])
+        ));
+    }
+
+    #[test]
+    fn origin_and_forwarded_ip_are_enforced_when_configured() {
+        let config = RpcSecurityConfig {
+            allowed_ips: vec!["10.0.0.1".to_string()],
+            cors_origins: vec!["https://wallet.example".to_string()],
+            ..Default::default()
+        };
+
+        let allowed = request_with_headers(&[
+            ("x-forwarded-for", "10.0.0.1"),
+            ("origin", "https://wallet.example"),
+        ]);
+        let denied_ip = request_with_headers(&[
+            ("x-forwarded-for", "10.0.0.2"),
+            ("origin", "https://wallet.example"),
+        ]);
+        let denied_origin =
+            request_with_headers(&[("x-forwarded-for", "10.0.0.1"), ("origin", "https://bad")]);
+
+        assert!(is_ip_allowed(&config, &allowed));
+        assert!(is_origin_allowed(&config, &allowed));
+        assert!(!is_ip_allowed(&config, &denied_ip));
+        assert!(!is_origin_allowed(&config, &denied_origin));
+    }
+
+    #[test]
+    fn rate_limit_uses_one_minute_window() {
+        let config = RpcSecurityConfig {
+            rate_limit_per_minute: Some(2),
+            ..Default::default()
+        };
+        let window = Arc::new(Mutex::new(VecDeque::new()));
+
+        assert!(is_rate_limited(&config, &window));
+        assert!(is_rate_limited(&config, &window));
+        assert!(!is_rate_limited(&config, &window));
+    }
+
+    #[test]
+    fn required_auth_requires_env_key() {
+        let result = RpcSecurityConfig::from_env(
+            true,
+            Some("BUDLUM_TEST_MISSING_RPC_KEY"),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+
+        assert!(result.is_err());
     }
 }

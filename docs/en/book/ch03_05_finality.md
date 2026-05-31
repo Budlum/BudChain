@@ -22,9 +22,11 @@ Validators inspect the checkpoint block and sign a BLS prevote if they consider 
 
 After prevote quorum, validators issue precommits. With two thirds precommit quorum, the checkpoint is marked finalized.
 
-## 3. Automatic Voting Loop
+## 3. Runtime Integration Status
 
-Hardening added a background voting mechanism so validators do not need manual intervention. When the current height is a checkpoint and no vote has been cast, the node broadcasts a vote through the network.
+`FinalityAggregator`, BLS certificate verification, epoch snapshots, QC gating, and the strict quorum formula `floor(2N/3) + 1` exist and are tested as library logic.
+
+The live node loop is not yet a production finality coordinator. It currently emits a placeholder `Prevote` with an empty signature and peer ID, while inbound `Prevote` and `Precommit` messages are rate-limited and logged but not fed into a live aggregator. A signed validator vote producer, live aggregation, precommit progression, and end-to-end multi-node liveness tests are Mainnet blockers.
 
 ## 4. Data Structure: `FinalityCert`
 

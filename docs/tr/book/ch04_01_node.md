@@ -190,7 +190,7 @@ async fn handle_network_event(&mut self, event: SwarmEvent<BudlumBehaviourEvent>
 
 ## 4. Bakım ve Operasyon (Hardening)
 
-Budlum'un üretim sürümünde, düğüm operatörleri için yeni bakım komutları eklenmiştir:
+Güncel hardening sürümünde, düğüm operatörleri için yeni bakım komutları eklenmiştir:
 
 - **`--check-db`**: Düğümü başlatmadan önce veritabanındaki tüm blokların hash ve bağlantı (linkage) bütünlüğünü kontrol eder.
 - **`--repair-db`**: Eğer veritabanı indeksleri (height -> hash) bozulmuşsa, ham blok verisinden indeksleri yeniden inşa eder.
@@ -202,3 +202,4 @@ Budlum'un üretim sürümünde, düğüm operatörleri için yeni bakım komutla
 
 **Tasarım Notu:**
 Burada blok geldiğinde `process_incoming_block` çağrılır. Bu fonksiyon, Bölüm 3'teki `validate_block` fonksiyonunu çağırır. Eğer blok geçerliyse zincire ekler, değilse göndereni banlar (`PeerManager`). Aynı şekilde `QcBlobResponse` geldiğinde mesaj sadece loglanmaz; parse edilir, `ChainActor` üzerinden doğrulatılır ve ancak başarılıysa peer iyi davranış puanı alır.
+> **Runtime sınırı:** Config V2 `identity_file`, `mdns_enabled`, `max_peers`, DNS seed ve banned-peer DB alanlarını parse eder. Güncel node ağ profilinin statik peer limitini uygular; ancak tüm alanlar libp2p runtime'ına bağlanmış değildir. Node kimliği başlangıçta geçici üretilir ve mDNS behavior her profilde oluşturulur. Kalıcı kimlik, profil kontrollü discovery ve kalıcı ban deposu Mainnet işidir.

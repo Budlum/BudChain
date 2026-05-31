@@ -77,8 +77,8 @@ async fn bench_high_tps() {
     let start_ingest = Instant::now();
 
     let concurrency = 16;
-    let mut futures: FuturesUnordered<Pin<Box<dyn Future<Output = Result<(), String>> + Send>>> =
-        FuturesUnordered::new();
+    type IngestFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+    let mut futures: FuturesUnordered<IngestFuture> = FuturesUnordered::new();
     let mut tx_iter = txs.into_iter();
 
     for _ in 0..concurrency {
@@ -91,7 +91,7 @@ async fn bench_high_tps() {
     }
 
     let mut ingested = 0;
-    while let Some(_) = futures.next().await {
+    while futures.next().await.is_some() {
         ingested += 1;
         if let Some(tx) = tx_iter.next() {
             let chain_clone = chain.clone();
