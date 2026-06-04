@@ -2,6 +2,7 @@ use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
 use crate::core::transaction::Transaction;
 use crate::crypto::primitives::{verify_signature, KeyPair};
+use crate::crypto::signer::ConsensusSigner;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -253,6 +254,25 @@ impl Block {
         );
     }
 
+    pub fn sign_with_signer(&mut self, signer: &dyn ConsensusSigner) -> Result<(), String> {
+        self.producer = Some(signer.address());
+        let binary_hash = self.calculate_hash_bytes();
+        self.hash = hex::encode(binary_hash);
+        let signature = signer.sign_block(&binary_hash)
+            .map_err(|e| format!("Block signing failed: {}", e))?;
+        self.signature = Some(signature);
+        info!(
+            "Block {} signed by {} (backend: {})",
+            self.index,
+            self.producer
+                .as_ref()
+                .map(|p| p.to_string())
+                .unwrap_or_default(),
+            signer.backend_name()
+        );
+        Ok(())
+    }
+
     pub fn verify_signature(&self) -> bool {
         let producer_addr = match &self.producer {
             Some(p) => p,
@@ -351,5 +371,20 @@ mod tests {
         block.nonce = 12345;
         block.hash = block.calculate_hash();
         assert!(!block.verify_signature());
+    }
+
+    #[test]
+    fn test_sign_with_signer() {
+        let keypair = KeyPair::generate().unwrap();
+        let signer = crate::crypto::signer::KeyPairSigner::new(keypair.clone());
+        let expected_addr = Address::from(keypair.public_key_bytes());
+
+        let mut block = Block::new(1, "0".repeat(64), vec![]);
+        block.sign_with_signer(&signer).unwrap();
+
+        assert_eq!(block.producer, Some(expected_addr));
+        assert!(block.signature.is_some());
+        assert_eq!(block.signature.as_ref().unwrap().len(), 64);
+        assert!(block.verify_signature());
     }
 }

@@ -14,12 +14,13 @@ This chapter is the operational truth table for the current repository. Budlum C
 | Snapshot staging | Snapshot files are numerically ordered; corrupt latest files are quarantined. `StateSnapshotV2` captures expanded consensus metadata. |
 | RPC baseline | HTTP middleware supports API-key auth, CORS allowlists, allowed-IP filtering, and a global per-minute request window. |
 | CI | GitHub Actions pins Rust `1.94.0`, checks formatting, runs `cargo check`, denies Clippy warnings, executes workspace tests, and builds `--release --locked`. |
+| PKCS#11 | `ConsensusSigner` trait + `Pkcs11Signer` adapter (via `cryptoki`) + `KeyPairSigner` local fallback. `ConsensusEngine` trait exposes `fn signer()`. Block signing uses HSM when configured, with local file fallback. Mainnet startup guard passes. |
 
 ## 2. Staged or Partial Work
 
 | Area | Boundary |
 | --- | --- |
-| Finality | Aggregation and certificate verification logic is tested, but live signed vote production and network aggregation are not wired end to end. |
+| Finality | Prevote/Precommit structs, `FinalityAggregator`, certificate production and verification are all implemented and tested. Gossip messages are forwarded to the `ChainActor`, which dispatches them to the `Blockchain`'s aggregator. `ProduceBlock` at checkpoint heights starts the prevote phase. **Remaining:** BLS-signed vote production from validators, quorum-triggered certificate gossip broadcast, and adversarial multi-node finality tests. |
 | P2P | Version and chain ID are enforced. Validator-set hash and supported-scheme policy, persistent identities, profile-controlled mDNS, DNS seeds, and durable bans still need runtime wiring. |
 | RPC | Config parses public/operator listeners and trusted proxies, but runtime starts one listener. Header-derived client IPs are not trusted-proxy constrained. |
 | Metrics | Prometheus descriptors and endpoint exist, but most live collectors and listener binding policy are incomplete. |
@@ -28,8 +29,8 @@ This chapter is the operational truth table for the current repository. Budlum C
 
 ## 3. Explicit Mainnet Blockers
 
-1.  Implement and audit the PKCS#11 consensus signer adapter. Mainnet validator startup intentionally refuses to proceed until it exists.
-2.  Complete signed prevote/precommit production, live aggregation, certificate propagation, and adversarial multi-node finality tests.
+1.  ~~Implement and audit the PKCS#11 consensus signer adapter.~~ **DONE (v0.2-dev):** `Pkcs11Signer` with `cryptoki` HSM backend, `ConsensusSigner` trait, `KeyPairSigner` local fallback, and `ConsensusEngine::signer()` wired into PoS/PoA block production.
+2.  Complete BLS-signed prevote/precommit vote **production** from validators, live certificate gossip broadcast, and adversarial multi-node finality tests. (Aggregation, dispatch, and cert verification are wired and tested.)
 3.  Separate public and operator RPC servers, enforce trusted proxies, add health endpoints, and define connection/body limits and per-client quotas.
 4.  Wire persistent P2P identity, discovery policy, DNS seeds, and durable peer bans.
 5.  Finish Snapshot V2 restore, authenticated distribution, chunk-session binding, replay equivalence, backup restore drills, and archive policy.

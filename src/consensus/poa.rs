@@ -22,22 +22,45 @@ impl Default for PoAConfig {
 }
 
 use crate::crypto::primitives::KeyPair;
+use crate::crypto::signer::ConsensusSigner;
+use std::sync::Arc;
 
 pub struct PoAEngine {
     pub config: PoAConfig,
     keypair: Option<KeyPair>,
+    signer: Option<Arc<dyn ConsensusSigner>>,
 }
 
 impl PoAEngine {
     pub fn new(config: PoAConfig, keypair: Option<KeyPair>) -> Self {
-        PoAEngine { config, keypair }
+        PoAEngine {
+            config,
+            keypair,
+            signer: None,
+        }
+    }
+
+    pub fn with_signer(
+        config: PoAConfig,
+        keypair: Option<KeyPair>,
+        signer: Arc<dyn ConsensusSigner>,
+    ) -> Self {
+        PoAEngine {
+            config,
+            keypair,
+            signer: Some(signer),
+        }
     }
     pub fn with_config(
         config: PoAConfig,
         _validators: Vec<Address>,
         keypair: Option<KeyPair>,
     ) -> Self {
-        PoAEngine { config, keypair }
+        PoAEngine {
+            config,
+            keypair,
+            signer: None,
+        }
     }
 
     pub fn expected_proposer<'a>(
@@ -75,6 +98,14 @@ impl PoAEngine {
             return Ok(None);
         }
 
+        if let Some(signer) = &self.signer {
+            let our_addr = signer.address();
+            if our_addr == expected_signer_addr {
+                block.producer = Some(our_addr);
+                return Ok(Some(our_addr));
+            }
+        }
+
         if let Some(kp) = &self.keypair {
             let our_addr = Address::from(kp.public_key_bytes());
             if our_addr == expected_signer_addr {
@@ -106,8 +137,16 @@ impl ConsensusEngine for PoAEngine {
                 block.index, expected_signer_addr
             );
 
-            if let Some(kp) = &self.keypair {
-                let kp: &KeyPair = kp;
+            if let Some(signer) = &self.signer {
+                if signer.address() == expected_signer_addr {
+                    block.sign_with_signer(signer.as_ref())
+                        .map_err(|e| ConsensusError(format!("HSM block signing failed: {}", e)))?;
+                    info!(
+                        "PoA: Block {} signed via HSM ({})",
+                        block.index, expected_signer_addr
+                    );
+                }
+            } else if let Some(kp) = &self.keypair {
                 let our_addr = Address::from(kp.public_key_bytes());
                 if our_addr == expected_signer_addr {
                     block.sign(kp);
@@ -185,6 +224,9 @@ impl ConsensusEngine for PoAEngine {
     }
     fn consensus_type(&self) -> &'static str {
         "PoA"
+    }
+    fn signer(&self) -> Option<&dyn ConsensusSigner> {
+        self.signer.as_ref().map(|s| s.as_ref())
     }
     fn info(&self) -> String {
         format!(

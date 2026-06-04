@@ -65,8 +65,9 @@ pub struct Checkpoint {
     pub timestamp: u128,
 }
 use crate::crypto::primitives::ValidatorKeys;
+use crate::crypto::signer::ConsensusSigner;
 
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use tracing::{info, warn};
 
 #[allow(clippy::type_complexity)]
@@ -76,6 +77,7 @@ pub struct PoSEngine {
     pub slashing_evidence: RwLock<Vec<SlashingEvidence>>,
     checkpoints: RwLock<Vec<Checkpoint>>,
     validator_keys: Option<ValidatorKeys>,
+    signer: Option<Arc<dyn ConsensusSigner>>,
     epoch_seed: RwLock<[u8; 32]>,
 }
 impl PoSEngine {
@@ -86,6 +88,23 @@ impl PoSEngine {
             slashing_evidence: RwLock::new(Vec::new()),
             checkpoints: RwLock::new(Vec::new()),
             validator_keys,
+            signer: None,
+            epoch_seed: RwLock::new([0u8; 32]),
+        }
+    }
+
+    pub fn with_signer(
+        config: PoSConfig,
+        validator_keys: Option<ValidatorKeys>,
+        signer: Arc<dyn ConsensusSigner>,
+    ) -> Self {
+        PoSEngine {
+            config,
+            seen_blocks: RwLock::new(HashMap::new()),
+            slashing_evidence: RwLock::new(Vec::new()),
+            checkpoints: RwLock::new(Vec::new()),
+            validator_keys,
+            signer: Some(signer),
             epoch_seed: RwLock::new([0u8; 32]),
         }
     }
@@ -376,6 +395,12 @@ impl ConsensusEngine for PoSEngine {
     fn prepare_block(&self, block: &mut Block, state: &AccountState) -> Result<(), ConsensusError> {
         self.preview_common(block, state)?;
 
+        if let Some(signer) = &self.signer {
+            block.sign_with_signer(signer.as_ref())
+                .map_err(|e| ConsensusError(format!("HSM block signing failed: {}", e)))?;
+            return Ok(());
+        }
+
         if let Some(keys) = &self.validator_keys {
             if block.producer == Some(Address::from(keys.sig_key.public_key_bytes())) {
                 block.sign(&keys.sig_key);
@@ -513,6 +538,9 @@ impl ConsensusEngine for PoSEngine {
     }
     fn consensus_type(&self) -> &'static str {
         "PoS"
+    }
+    fn signer(&self) -> Option<&dyn ConsensusSigner> {
+        self.signer.as_ref().map(|s| s.as_ref())
     }
     fn info(&self) -> String {
         format!(

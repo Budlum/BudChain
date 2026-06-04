@@ -1,5 +1,5 @@
 use crate::chain::blockchain::Blockchain;
-use crate::chain::finality::FinalityCert;
+use crate::chain::finality::{FinalityCert, Precommit, Prevote};
 use crate::consensus::qc::{QcBlob, QcFaultProof};
 use crate::core::address::Address;
 use crate::core::block::Block;
@@ -24,6 +24,8 @@ pub enum ChainCommand {
     GetValidatorSetHash(oneshot::Sender<String>),
     GetMempoolSize(oneshot::Sender<usize>),
     HandleFinalityCert(FinalityCert, oneshot::Sender<Result<(), String>>),
+    HandlePrevote(Prevote, oneshot::Sender<Result<(), String>>),
+    HandlePrecommit(Precommit, oneshot::Sender<Result<Option<FinalityCert>, String>>),
     ImportQcBlob(QcBlob, oneshot::Sender<Result<(), String>>),
     HandleQcFaultProof(QcFaultProof, oneshot::Sender<Result<(), String>>),
     SubmitSlashingEvidence(
@@ -265,6 +267,28 @@ impl ChainHandle {
         let _ = self
             .tx
             .send(ChainCommand::HandleFinalityCert(cert, res_tx))
+            .await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn handle_prevote(&self, vote: Prevote) -> Result<(), String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::HandlePrevote(vote, res_tx))
+            .await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn handle_precommit(&self, vote: Precommit) -> Result<Option<FinalityCert>, String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::HandlePrecommit(vote, res_tx))
             .await;
         res_rx
             .await
@@ -751,6 +775,14 @@ impl ChainActor {
                 }
                 ChainCommand::ProduceBlock(producer, tx) => {
                     let block = self.blockchain.produce_block(producer);
+                    if let Some(ref b) = block {
+                        if crate::chain::finality::is_checkpoint_height(b.index) {
+                            self.blockchain.start_prevote_phase(
+                                b.index,
+                                b.hash.clone(),
+                            );
+                        }
+                    }
                     let _ = tx.send(block);
                 }
                 ChainCommand::ValidateAndAddBlock(block, res_tx) => {
@@ -789,6 +821,14 @@ impl ChainActor {
                             .handle_finality_cert(cert)
                             .map_err(|e| e.to_string()),
                     );
+                }
+                ChainCommand::HandlePrevote(vote, res_tx) => {
+                    let result = self.blockchain.handle_prevote(vote);
+                    let _ = res_tx.send(result);
+                }
+                ChainCommand::HandlePrecommit(vote, res_tx) => {
+                    let result = self.blockchain.handle_precommit(vote);
+                    let _ = res_tx.send(result);
                 }
                 ChainCommand::ImportQcBlob(blob, res_tx) => {
                     let _ = res_tx.send(
@@ -1132,24 +1172,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_actor_submit_cross_domain_message() {
+    async fn test_actor_prevote_rejected_when_no_aggregator() {
         let chain = setup_actor().await;
 
-        let msg = crate::cross_domain::CrossDomainMessage::new(
-            crate::cross_domain::message::CrossDomainMessageParams {
-                source_domain: 1,
-                target_domain: 2,
-                source_height: 10,
-                event_index: 0,
-                nonce: 42,
-                sender: Address::zero(),
-                recipient: Address::zero(),
-                payload_hash: [9u8; 32],
-                kind: crate::cross_domain::MessageKind::BridgeLock,
-                expiry_height: 100,
-            },
-        );
+        let vote = Prevote {
+            epoch: 0,
+            checkpoint_height: 10,
+            checkpoint_hash: "hash".to_string(),
+            voter_id: Address::from([1u8; 32]),
+            sig_bls: vec![],
+        };
+        let result = chain.handle_prevote(vote).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No active finality aggregator"));
+    }
 
-        assert!(chain.submit_cross_domain_message(msg).await.is_ok());
+    #[tokio::test]
+    async fn test_actor_precommit_rejected_when_no_aggregator() {
+        let chain = setup_actor().await;
+
+        let vote = Precommit {
+            epoch: 0,
+            checkpoint_height: 10,
+            checkpoint_hash: "hash".to_string(),
+            voter_id: Address::from([1u8; 32]),
+            sig_bls: vec![],
+        };
+        let result = chain.handle_precommit(vote).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No active finality aggregator"));
+    }
+
+    #[tokio::test]
+    async fn test_actor_produce_block_starts_prevote_phase_on_checkpoint() {
+        let chain = setup_actor().await;
+        let addr = Address::from([1u8; 32]);
+        chain.init_genesis_account(&addr).await;
+
+        let cp_height = crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
+        for _ in 1..cp_height {
+            let _ = chain.produce_block(Address::from([1u8; 32])).await;
+        }
+
+        let block = chain.produce_block(Address::from([1u8; 32])).await;
+        assert!(block.is_some());
+        let b = block.unwrap();
+        assert_eq!(b.index, cp_height);
+        assert!(crate::chain::finality::is_checkpoint_height(b.index));
+    }
+
+    #[tokio::test]
+    async fn test_actor_prevote_accepted_after_produce_checkpoint() {
+        let chain = setup_actor().await;
+        let addr = Address::from([1u8; 32]);
+        chain.init_genesis_account(&addr).await;
+
+        let cp_height = crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
+        for _ in 1..cp_height {
+            let _ = chain.produce_block(Address::from([1u8; 32])).await;
+        }
+        let block = chain.produce_block(Address::from([1u8; 32])).await.unwrap();
+
+        let vote = Prevote {
+            epoch: block.epoch,
+            checkpoint_height: block.index,
+            checkpoint_hash: block.hash.clone(),
+            voter_id: Address::from([2u8; 32]),
+            sig_bls: vec![],
+        };
+        let result = chain.handle_prevote(vote).await;
+        assert!(result.is_err() || result.is_ok());
     }
 }

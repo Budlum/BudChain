@@ -55,6 +55,8 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 tower = "0.4"
+cryptoki = "0.6"
+secrecy = "0.8"
 async-trait = "0.1"
 rayon = "1.10"
 bud-isa = { path = "../BudZKVM/bud-isa" }

@@ -16,6 +16,14 @@ Bu döküman, Çoklu Konsensüs Yerleşim Katmanı'nın doğrulama durumunu taki
 | `verified_pow_commitment_requires_finalized_depth_and_matching_proof_hash` | Proof hash uyuşmazlığı ve PoW finality reddi | ✅ Geçti |
 | `full_bridge_lifecycle_lock_mint_burn_unlock_with_proof_verification` | Doğrulanmış bridge lock/mint/burn/unlock lifecycle | ✅ Geçti |
 | `bridge_unlock_requires_verified_burn_event_from_target_domain` | Raw unlock reddi ve target-domain burn proof zorunluluğu | ✅ Geçti |
+| `test_prevote_precommit_full_lifecycle` | Tek validator prevote quorum → precommit → cert akışı | ✅ Geçti |
+| `test_prevote_rejects_wrong_checkpoint_hash` | Yanlış hash'li prevote reddi | ✅ Geçti |
+| `test_start_prevote_phase_creates_aggregator` | `start_prevote_phase()` `FinalityAggregator` oluşturur | ✅ Geçti |
+| `test_handle_prevote_rejects_when_no_aggregator` | Aggregator yokken prevote reddi | ✅ Geçti |
+| `test_handle_precommit_rejects_when_no_aggregator` | Aggregator yokken precommit reddi | ✅ Geçti |
+| `test_actor_produce_block_starts_prevote_phase_on_checkpoint` | `ChainActor` checkpoint'te prevote fazını otomatik başlatır | ✅ Geçti |
+| `test_actor_prevote_accepted_after_produce_checkpoint` | Checkpoint blok sonrası prevote kabul edilir | ✅ Geçti |
+| `test_sign_with_signer` | `ConsensusSigner` trait üzerinden `sign_with_signer()` | ✅ Geçti |
 
 ## 2. Mimari Diyagram
 
@@ -78,3 +86,5 @@ Deponun mevcut durumu **kontrollü public devnet adayıdır**; audited mainnet i
 - [x] Dağıtık düğüm yakınsaması doğrulandı.
 - [x] Slashing evidence gossip ve blok dahil etme akışı.
 - [x] Devnet seviyesinde PoS slashing/reward execution.
+- [x] PKCS#11 HSM imza adaptörü (`ConsensusSigner` trait + `Pkcs11Signer` + `KeyPairSigner`).
+- [x] Finality aggregator kablolaması: Prevote/Precommit gossip → ChainActor → Blockchain aggregator → certificate production.

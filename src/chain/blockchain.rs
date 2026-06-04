@@ -1,4 +1,4 @@
-use crate::chain::finality::{FinalityCert, ValidatorEntry, ValidatorSetSnapshot};
+use crate::chain::finality::{FinalityAggregator, FinalityCert, Precommit, Prevote, ValidatorEntry, ValidatorSetSnapshot};
 use crate::chain::genesis::{GenesisConfig, GENESIS_TIMESTAMP};
 use crate::chain::snapshot::PruningManager;
 use crate::consensus::pos::SlashingEvidence;
@@ -56,6 +56,7 @@ pub struct Blockchain {
     pub message_registry: CrossDomainMessageRegistry,
     pub settlement_finality_hashes: Vec<crate::domain::Hash32>,
     pub pending_slashing_evidence: Vec<SlashingEvidence>,
+    pub finality_aggregator: Option<FinalityAggregator>,
 }
 impl Blockchain {
     pub fn new(
@@ -332,6 +333,7 @@ impl Blockchain {
             message_registry,
             settlement_finality_hashes: Vec::new(),
             pending_slashing_evidence: Vec::new(),
+            finality_aggregator: None,
         };
 
         if let Some(first) = bc.chain.first() {
@@ -2273,6 +2275,51 @@ impl Blockchain {
         Ok(())
     }
 
+    pub fn handle_prevote(&mut self, vote: Prevote) -> Result<(), String> {
+        let aggregator = self
+            .finality_aggregator
+            .as_mut()
+            .ok_or("No active finality aggregator")?;
+        aggregator.add_prevote(vote).map_err(|e| e.to_string())
+    }
+
+    pub fn handle_precommit(
+        &mut self,
+        vote: Precommit,
+    ) -> Result<Option<FinalityCert>, String> {
+        let aggregator = self
+            .finality_aggregator
+            .as_mut()
+            .ok_or("No active finality aggregator")?;
+        aggregator.add_precommit(vote).map_err(|e| e.to_string())?;
+
+        if aggregator.precommit_quorum_reached {
+            let cert = aggregator.try_produce_cert();
+            if let Some(cert) = &cert {
+                info!(
+                    "FinalityCert produced: epoch={}, height={}",
+                    cert.epoch, cert.checkpoint_height
+                );
+                self.finality_aggregator = None;
+            }
+            Ok(cert)
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn start_prevote_phase(&mut self, checkpoint_height: u64, checkpoint_hash: String) {
+        let epoch = checkpoint_height / crate::core::chain_config::EPOCH_LEN;
+        let mut aggregator = FinalityAggregator::new(epoch, checkpoint_height, checkpoint_hash);
+        let snapshot = self.validator_snapshot_for_epoch(epoch);
+        aggregator.set_validator_snapshot(snapshot);
+        self.finality_aggregator = Some(aggregator);
+        info!(
+            "Started prevote phase for checkpoint height={} (epoch={})",
+            checkpoint_height, epoch
+        );
+    }
+
     pub fn consensus(&self) -> &dyn ConsensusEngine {
         self.consensus.as_ref()
     }
@@ -2302,6 +2349,7 @@ impl Clone for Blockchain {
             message_registry: self.message_registry.clone(),
             settlement_finality_hashes: self.settlement_finality_hashes.clone(),
             pending_slashing_evidence: self.pending_slashing_evidence.clone(),
+            finality_aggregator: None,
         }
     }
 }
@@ -2659,5 +2707,71 @@ mod tests {
         bc.apply_state_snapshot(snapshot).unwrap();
 
         assert_eq!(bc.state.get_balance(&Address::from([9u8; 32])), 0);
+    }
+
+    #[test]
+    fn test_start_prevote_phase_creates_aggregator() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let cp_height = crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
+        let cp_hash = "a".repeat(64);
+
+        bc.start_prevote_phase(cp_height, cp_hash.clone());
+
+        assert!(bc.finality_aggregator.is_some());
+        let agg = bc.finality_aggregator.as_ref().unwrap();
+        assert_eq!(agg.checkpoint_height, cp_height);
+        assert_eq!(agg.checkpoint_hash, cp_hash);
+        assert!(!agg.prevote_quorum_reached);
+        assert!(!agg.precommit_quorum_reached);
+    }
+
+    #[test]
+    fn test_handle_prevote_rejects_when_no_aggregator() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 1337, None);
+
+        let vote = Prevote {
+            epoch: 0,
+            checkpoint_height: 10,
+            checkpoint_hash: "hash".to_string(),
+            voter_id: Address::from([1u8; 32]),
+            sig_bls: vec![],
+        };
+        let result = bc.handle_prevote(vote);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No active finality aggregator"));
+    }
+
+    #[test]
+    fn test_handle_precommit_rejects_when_no_aggregator() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 1337, None);
+
+        let vote = Precommit {
+            epoch: 0,
+            checkpoint_height: 10,
+            checkpoint_hash: "hash".to_string(),
+            voter_id: Address::from([1u8; 32]),
+            sig_bls: vec![],
+        };
+        let result = bc.handle_precommit(vote);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No active finality aggregator"));
+    }
+
+    #[test]
+    fn test_produce_block_advances_to_checkpoint() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        bc.state.add_balance(&Address::from([1u8; 32]), 1000);
+
+        let cp_height = crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
+        while bc.chain.len() < cp_height as usize {
+            bc.produce_block(Address::from([1u8; 32]));
+        }
+
+        assert_eq!(bc.chain.len() as u64, cp_height);
+        assert_eq!(bc.chain.last().unwrap().index, cp_height - 1);
     }
 }

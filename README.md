@@ -3,14 +3,14 @@
 > **A controlled public-devnet candidate for Layer-1 blockchain research: modular, deterministic, and multi-consensus native.**
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/rade/budlum-core)
-[![Test Coverage](https://img.shields.io/badge/tests-282-blue)](https://github.com/rade/budlum-core)
+[![Test Coverage](https://img.shields.io/badge/tests-292-blue)](https://github.com/rade/budlum-core)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust Version](https://img.shields.io/badge/rust-1.94.0-orange.svg)](https://www.rust-lang.org/)
 
 ---
 
 > [!CAUTION]
-> **Controlled Public Devnet Candidate (v0.1-devnet-candidate)**
+> **Controlled Public Devnet Candidate (v0.2-dev)**
 >
 > Budlum Core is suitable for controlled public devnet experiments with clear risk disclaimers. It is **NOT** audited mainnet software, has not completed professional security review, and should **NOT** be used for financial transactions or production applications carrying real value.
 
@@ -74,7 +74,7 @@ graph TD
 
 ---
 
-## 🧩 Devnet Candidate Features (v0.1)
+## 🧩 Devnet Candidate Features (v0.2)
 
 ### 🌍 Multi-Consensus Settlement (Model B)
 An implementation of a **Byzantine-Hardened Settlement Layer** designed for network chaos:
@@ -90,6 +90,8 @@ An implementation of a **Byzantine-Hardened Settlement Layer** designed for netw
 - **Secured Hash Framing**: Prepends every field with its length prefix (64-bit LE) during multi-field hashing (`hash_fields_bytes`) to mathematically rule out framing/concatenation collisions.
 - **Rollback-Protected Snapshot Sync**: State sync verifies P2P snapshots against the node's `chain_id` and strictly rejects snapshot heights older than `finalized_height` to eliminate state rollback attacks.
 - **Durable Database Index Repair**: Fully modernized `--repair-db` module that reconstructs all index mappings (`HEIGHT:`, `TX_IDX:`, `CANONICAL_HEIGHT`, `LAST`) directly from raw block data.
+- **PKCS#11 HSM Signing**: `ConsensusSigner` trait with pluggable backends: `Pkcs11Signer` (Hardware Security Module via `cryptoki`) and `KeyPairSigner` (local file fallback). Mainnet validator startup now proceeds with HSM configuration.
+- **Finality Aggregator Wiring**: Prevote and Precommit gossip messages are forwarded through `ChainActor` to the `Blockchain`'s `FinalityAggregator`. Checkpoint blocks automatically trigger the prevote phase. Quorum-driven certificate production verified in integration tests.
 
 ### 🌉 Verified Cross-Domain Bridge
 - **Bridge-Enabled Domains Only**: Asset registration and lock operations require active, registered, bridge-enabled domains.
@@ -110,6 +112,7 @@ An implementation of a **Byzantine-Hardened Settlement Layer** designed for netw
 ### 🌐 Networking & Resilience
 - **libp2p Integration**: Robust P2P transport with peer reputation.
 - **Automatic Sync Start**: Handshake height gaps trigger headers-first sync, and `bud_syncing` reports real sync state.
+- **Finality Gossip**: Prevote/Precommit messages are received, verified, and forwarded to the `FinalityAggregator` for quorum-driven certificate production. Finality certs are gossiped network-wide.
 - **Slashing Evidence Gossip**: PoS double-sign evidence is gossiped as a network message and included by later producers.
 - **Operational Resilience**: Anti-spam mempool, fee-based ordering, and database integrity audits.
 - **Deterministic Restarts**: State recovery from persistent Sled-backed storage.
@@ -126,7 +129,7 @@ An implementation of a **Byzantine-Hardened Settlement Layer** designed for netw
 
 Budlum Core is built with a "Test-First" engineering mindset. The architecture is validated against extreme edge cases and adversarial scenarios.
 
-- **Total Tests**: `282` (All passing ✅)
+- **Total Tests**: `292` (All passing ✅)
 - **Byzantine Chaos Matrix**: 18 specific scenarios covering network partitions, packet duplication, out-of-order delivery, and domain equivocation.
 - **Distributed Devnet Simulation**: Verified gossip convergence across a 5-node `libp2p` mesh with isolated storage.
 - **Persistence Recovery**: State and pending buffers are recovered after simulated node crashes during pending commitment cycles.
@@ -142,9 +145,9 @@ nix develop --command cargo test --workspace
 
 ## 🔒 Production Hardening Status
 
-The repository now includes fail-closed Mainnet guardrails, Strict Config V2, safer genesis tooling, a versioned composite state commitment, durable canonical commit recovery, staged Snapshot V2 helpers, baseline RPC middleware, and pinned CI release gates.
+The repository now includes fail-closed Mainnet guardrails, Strict Config V2, safer genesis tooling, a versioned composite state commitment, durable canonical commit recovery, staged Snapshot V2 helpers, baseline RPC middleware, PKCS#11 HSM signing adapter, finality aggregator wiring, and pinned CI release gates.
 
-This is still **not Mainnet-ready**. Mainnet validator startup intentionally refuses to continue until the PKCS#11 consensus signer adapter exists. Live signed finality aggregation, separate public/operator RPC listeners, trusted-proxy enforcement, persistent P2P identity, complete Snapshot V2 restore, operational packaging, and external audit work remain open.
+This is still **not Mainnet-ready**. BLS-signed vote production from validators, separate public/operator RPC listeners, trusted-proxy enforcement, persistent P2P identity, complete Snapshot V2 restore, operational packaging, and external audit work remain open.
 
 Read the book's [**Production Hardening Status**](docs/en/book/ch12_production_hardening.md) chapter for the detailed implementation matrix and explicit blockers.
 
@@ -215,6 +218,8 @@ See the full [**Protocol Specification**](SPECIFICATION.md) for a detailed API r
 - [x] **Verified Settlement Hardening**: Proof-gated domain commitments, parent-link checks, strict nonce rejection, and validator-set anchoring.
 - [x] **Verified Bridge Return Path**: Bridge unlock requires a committed target-domain burn event proof.
 - [x] **Sync Hardening**: Handshake-triggered headers-first sync and real sync status reporting.
+- [x] **PKCS#11 HSM Signer**: `ConsensusSigner` trait, `Pkcs11Signer` (`cryptoki`), `KeyPairSigner` local fallback, wired into PoS/PoA block production. Mainnet validator startup gate removed.
+- [x] **Finality Aggregator Wiring**: Prevote/Precommit gossip → ChainActor → Blockchain aggregator → auto-start at checkpoint heights. Certificate production and verification wired.
 - [ ] **ZKVM Optimizations**: Improving STARK proof generation performance.
 - [ ] **Formal Verification**: Researching TLA+ models for settlement convergence.
 - [x] **Baseline RPC Middleware**: API-key auth, CORS allowlists, allowed-IP filtering, and a global request-rate window.

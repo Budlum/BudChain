@@ -11,6 +11,7 @@ mod integration_tests {
     use crate::core::transaction::Transaction;
     use crate::crypto::primitives::KeyPair;
     use crate::execution::executor::Executor;
+    use crate::chain::finality::{Precommit, Prevote, is_checkpoint_height};
     use std::sync::Arc;
 
     #[test]
@@ -575,5 +576,83 @@ mod integration_tests {
         let consensus = Arc::new(PoAEngine::new(PoAConfig::default(), None));
         let storage2 = Storage::new(path).unwrap();
         let _bc = Blockchain::new(consensus, Some(storage2), 1337, None);
+    }
+
+    #[test]
+    fn test_prevote_precommit_full_lifecycle() {
+        use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
+        let keypair = KeyPair::generate().unwrap();
+        let validator_addr = Address::from(keypair.public_key_bytes());
+
+        let mut state = AccountState::new();
+        state.add_balance(&validator_addr, 10000);
+        state.add_validator(validator_addr, 5000);
+
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        bc.state = state;
+
+        let cp_height = FINALITY_CHECKPOINT_INTERVAL;
+        for _ in 1..cp_height {
+            bc.produce_block(validator_addr);
+        }
+        let block = bc.produce_block(validator_addr).unwrap();
+        assert_eq!(block.index, cp_height);
+        assert!(is_checkpoint_height(block.index));
+
+        bc.start_prevote_phase(block.index, block.hash.clone());
+        assert!(bc.finality_aggregator.is_some());
+
+        let epoch = block.epoch;
+        let hash = block.hash.clone();
+
+        let vote1 = Prevote {
+            epoch,
+            checkpoint_height: cp_height,
+            checkpoint_hash: hash.clone(),
+            voter_id: validator_addr,
+            sig_bls: vec![],
+        };
+        assert!(bc.handle_prevote(vote1).is_ok());
+
+        let vote2 = Precommit {
+            epoch,
+            checkpoint_height: cp_height,
+            checkpoint_hash: hash.clone(),
+            voter_id: validator_addr,
+            sig_bls: vec![],
+        };
+        let result = bc.handle_precommit(vote2);
+        assert!(!result.is_err(), "single validator should reach both prevote and precommit quorum");
+    }
+
+    #[test]
+    fn test_prevote_rejects_wrong_checkpoint_hash() {
+        let keypair = KeyPair::generate().unwrap();
+        let v_addr = Address::from(keypair.public_key_bytes());
+
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        bc.state.add_balance(&v_addr, 10000);
+        bc.state.add_validator(v_addr, 5000);
+
+        let cp_height = crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
+        for _ in 1..cp_height {
+            bc.produce_block(v_addr);
+        }
+        let _block = bc.produce_block(v_addr).unwrap();
+
+        bc.start_prevote_phase(cp_height, "correct_hash".to_string());
+
+        let wrong_vote = Prevote {
+            epoch: 0,
+            checkpoint_height: cp_height,
+            checkpoint_hash: "wrong_hash".to_string(),
+            voter_id: v_addr,
+            sig_bls: vec![],
+        };
+        let result = bc.handle_prevote(wrong_vote);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("hash mismatch"));
     }
 }

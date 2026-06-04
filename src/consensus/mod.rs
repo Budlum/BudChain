@@ -57,6 +57,9 @@ pub trait ConsensusEngine: Send + Sync {
     }
     fn consensus_type(&self) -> &'static str;
     fn info(&self) -> String;
+    fn signer(&self) -> Option<&dyn crate::crypto::signer::ConsensusSigner> {
+        None
+    }
     fn validate_timestamp(
         &self,
         block: &Block,

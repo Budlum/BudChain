@@ -14,12 +14,13 @@ Bu bölüm reponun güncel operasyonel gerçeklik tablosudur. Budlum Core kontro
 | Snapshot aşaması | Snapshot dosyaları sayısal sıralanır; bozuk en yeni dosya karantinaya alınır. `StateSnapshotV2` genişletilmiş konsensüs metadata'sı taşır. |
 | RPC tabanı | HTTP middleware API-key auth, CORS allowlist, allowed-IP filtresi ve global dakikalık istek penceresi sağlar. |
 | CI | GitHub Actions Rust `1.94.0` sürümünü pinler; format, `cargo check`, warning'leri reddeden Clippy, workspace testleri ve `--release --locked` build çalıştırır. |
+| PKCS#11 | `ConsensusSigner` trait + `Pkcs11Signer` adaptörü (`cryptoki` ile) + `KeyPairSigner` local fallback. `ConsensusEngine` trait `fn signer()` sunar. Blok imzalama HSM varsa onu, yoksa local dosyayı kullanır. Mainnet başlangıç engeli kalktı. |
 
 ## 2. Aşamalı veya Kısmi İşler
 
 | Alan | Sınır |
 | --- | --- |
-| Finality | Agregasyon ve sertifika doğrulama mantığı testlidir; canlı imzalı vote üretimi ve ağ agregasyonu uçtan uca bağlı değildir. |
+| Finality | Prevote/Precommit struct'ları, `FinalityAggregator`, sertifika üretimi ve doğrulaması uygulandı ve test edildi. Gossip mesajları `ChainActor`'a yönlendiriliyor, oradan `Blockchain` aggregator'ına gönderiliyor. Checkpoint blok sonrası prevote fazı otomatik başlıyor. **Kalan:** BLS imzalı vote üretimi, quorum sonrası sertifika yayını ve çok node'lu finality testleri. |
 | P2P | Version ve chain ID zorlanır. Validator-set hash ve scheme policy, kalıcı kimlik, profil kontrollü mDNS, DNS seed ve kalıcı ban runtime bağlantıları eksiktir. |
 | RPC | Config public/operator listener ve trusted proxy alanlarını parse eder; runtime tek listener başlatır. Header tabanlı IP değeri trusted-proxy kısıtına bağlı değildir. |
 | Metrics | Prometheus tanımları ve endpoint vardır; canlı collector'ların çoğu ve listener binding politikası eksiktir. |
@@ -28,8 +29,8 @@ Bu bölüm reponun güncel operasyonel gerçeklik tablosudur. Budlum Core kontro
 
 ## 3. Açık Mainnet Engelleri
 
-1. PKCS#11 konsensüs signer adapter'ını uygula ve denetle. Mainnet validator başlangıcı bu adapter gelene kadar bilinçli olarak reddedilir.
-2. İmzalı prevote/precommit üretimini, canlı agregasyonu, sertifika yayılımını ve saldırgan çok node'lu finality testlerini tamamla.
+1. ~~PKCS#11 konsensüs signer adapter'ını uygula ve denetle.~~ **TAMAMLANDI (v0.2-dev):** `Pkcs11Signer` (`cryptoki` HSM backend), `ConsensusSigner` trait, `KeyPairSigner` local fallback, PoS/PoA blok üretimine bağlandı.
+2. BLS imzalı prevote/precommit vote **üretimini**, canlı sertifika yayınını ve saldırgan çok node'lu finality testlerini tamamla. (Agregasyon, dağıtım ve sertifika doğrulaması bağlandı ve test edildi.)
 3. Public ve operator RPC sunucularını ayır; trusted proxy zorlaması, health endpoint, connection/body limitleri ve istemci bazlı quota ekle.
 4. Kalıcı P2P kimliği, discovery politikası, DNS seed ve kalıcı peer ban bağlantılarını tamamla.
 5. Snapshot V2 restore, kimliği doğrulanmış dağıtım, chunk-session bağlama, replay eşdeğerliği, backup restore tatbikatı ve archive politikasını tamamla.

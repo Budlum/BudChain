@@ -1,4 +1,4 @@
-# Budlum Core Specification (v0.1)
+# Budlum Core Specification (v0.2)
 
 ## 1. Multi-Consensus Settlement
 
@@ -34,7 +34,16 @@ Rewards are calculated per block as `total_fees + block_reward`. They are credit
 ### 3.1 Handshake & Sync
 On connection, nodes exchange `Handshake` messages. If a peer reports a higher height, a `GetHeaders` request is automatically triggered.
 
-### 3.2 JSON-RPC API (`bud_`)
+### 3.2 Finality Protocol (v0.2)
+The finality protocol operates in three phases at each checkpoint height (`FINALITY_CHECKPOINT_INTERVAL = 10`):
+
+1. **Prevote Phase**: Started automatically when a node produces a block at a checkpoint height. Validators broadcast `NetworkMessage::Prevote` with their BLS signature over the checkpoint (epoch, height, hash).
+2. **Precommit Phase**: After the prevote quorum (2/3 of stake) is reached, validators broadcast `NetworkMessage::Precommit`. The `FinalityAggregator` tracks votes and checks quorum.
+3. **Certificate Production**: Once the precommit quorum is reached, the aggregator produces a `FinalityCert` containing an aggregated BLS signature and a signer bitmap. The cert is gossiped via `NetworkMessage::FinalityCert`.
+
+The gossip path is: `GossipSub` → `Node` → `ChainHandle::handle_prevote/handle_precommit` → `ChainActor` → `Blockchain::finality_aggregator`.
+
+### 3.3 JSON-RPC API (`bud_`)
 The node exposes a standard JSON-RPC 2.0 interface.
 
 | Method | Description |
@@ -48,7 +57,19 @@ The node exposes a standard JSON-RPC 2.0 interface.
 
 ---
 
-## 4. Storage Architecture
+## 4. Security & Signing
+
+### 4.1 ConsensusSigner Trait (v0.2)
+Block signing is abstracted behind the `ConsensusSigner` trait (`src/crypto/signer.rs`):
+
+- **`KeyPairSigner`**: Local Ed25519 key file (devnet/testnet default).
+- **`Pkcs11Signer`**: Hardware Security Module via `cryptoki` (mainnet requirement). Loads the PKCS#11 module, opens a session on the configured slot, authenticates with the token PIN, and signs via CKM_EDDSA.
+
+Both backends are injected into `PoSEngine` and `PoAEngine` via `with_signer()` constructors. Block production checks the signer first, falling back to local key files.
+
+### 4.2 Storage Architecture
+
+### 4.2 Storage Architecture
 
 Budlum uses a trait-based storage abstraction (`BlockchainStorage`) currently implemented via `sled`.
 
@@ -57,3 +78,6 @@ Budlum uses a trait-based storage abstraction (`BlockchainStorage`) currently im
   - `BLOCK:<hash>`: Full block data.
   - `DOMAIN:<id>`: Domain configuration and state.
   - `DOMAIN_COMMITMENT:<id>:<height>:<seq>`: Archived commitments.
+  - `QC_BLOB:<height>`: Quorum Certificate blobs.
+  - `FINALITY_CERT:<height>`: Finality certificates.
+  - `GLOBAL_HEADER:<height>`: Global settlement headers.

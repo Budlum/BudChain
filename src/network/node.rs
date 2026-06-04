@@ -26,6 +26,7 @@ pub struct BudlumBehaviour {
     sync: request_response::Behaviour<crate::network::sync_codec::SyncCodec>,
 }
 use crate::chain::chain_actor::ChainHandle;
+use crate::chain::finality::{Precommit, Prevote};
 use crate::network::peer_manager::PeerManager;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -879,7 +880,7 @@ impl Node {
                                         }
                                     }
 
-                                    NetworkMessage::Prevote { epoch, checkpoint_height, checkpoint_hash, voter_id, .. } => {
+                                    NetworkMessage::Prevote { epoch, checkpoint_height, checkpoint_hash, voter_id, sig_bls } => {
                                         let rate_limit_ok = self.peer_manager.lock()
                                             .map(|mut pm| pm.check_vote_rate_limit(&peer_id))
                                             .unwrap_or(false);
@@ -889,9 +890,35 @@ impl Node {
                                         }
                                         info!("Prevote from {}: epoch={}, height={}, hash={}..., voter={}",
                                             peer_id, epoch, checkpoint_height, &checkpoint_hash[..16.min(checkpoint_hash.len())], voter_id);
+
+                                        let voter_addr = match crate::core::address::Address::from_hex(&voter_id) {
+                                            Ok(addr) => addr,
+                                            Err(e) => {
+                                                warn!("Invalid voter_id in Prevote: {}", e);
+                                                continue;
+                                            }
+                                        };
+
+                                        let prevote = Prevote {
+                                            epoch,
+                                            checkpoint_height,
+                                            checkpoint_hash,
+                                            voter_id: voter_addr,
+                                            sig_bls,
+                                        };
+                                        match self.chain.handle_prevote(prevote).await {
+                                            Ok(_) => {
+                                                if let Ok(mut pm) = self.peer_manager.lock() {
+                                                    pm.report_good_behavior(&peer_id);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!("Prevote from {} rejected: {}", peer_id, e);
+                                            }
+                                        }
                                     }
 
-                                    NetworkMessage::Precommit { epoch, checkpoint_height, checkpoint_hash, voter_id, .. } => {
+                                    NetworkMessage::Precommit { epoch, checkpoint_height, checkpoint_hash, voter_id, sig_bls } => {
                                         let rate_limit_ok = self.peer_manager.lock()
                                             .map(|mut pm| pm.check_vote_rate_limit(&peer_id))
                                             .unwrap_or(false);
@@ -901,6 +928,51 @@ impl Node {
                                         }
                                         info!("Precommit from {}: epoch={}, height={}, hash={}..., voter={}",
                                             peer_id, epoch, checkpoint_height, &checkpoint_hash[..16.min(checkpoint_hash.len())], voter_id);
+
+                                        let voter_addr = match crate::core::address::Address::from_hex(&voter_id) {
+                                            Ok(addr) => addr,
+                                            Err(e) => {
+                                                warn!("Invalid voter_id in Precommit: {}", e);
+                                                continue;
+                                            }
+                                        };
+
+                                        let precommit = Precommit {
+                                            epoch,
+                                            checkpoint_height,
+                                            checkpoint_hash,
+                                            voter_id: voter_addr,
+                                            sig_bls,
+                                        };
+                                        match self.chain.handle_precommit(precommit).await {
+                                            Ok(Some(cert)) => {
+                                                info!("FinalityCert produced from precommit: epoch={}, height={}", cert.epoch, cert.checkpoint_height);
+                                                if let Ok(mut pm) = self.peer_manager.lock() {
+                                                    pm.report_good_behavior(&peer_id);
+                                                }
+                                                let topic = gossipsub::IdentTopic::new("blocks");
+                                                let _ = self.swarm.behaviour_mut().gossipsub.publish(
+                                                    topic,
+                                                    NetworkMessage::FinalityCert {
+                                                        epoch: cert.epoch,
+                                                        checkpoint_height: cert.checkpoint_height,
+                                                        checkpoint_hash: cert.checkpoint_hash,
+                                                        agg_sig_bls: cert.agg_sig_bls,
+                                                        bitmap: cert.bitmap,
+                                                        set_hash: cert.set_hash,
+                                                    }
+                                                    .to_bytes(),
+                                                );
+                                            }
+                                            Ok(None) => {
+                                                if let Ok(mut pm) = self.peer_manager.lock() {
+                                                    pm.report_good_behavior(&peer_id);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!("Precommit from {} rejected: {}", peer_id, e);
+                                            }
+                                        }
                                     }
 
                                     NetworkMessage::FinalityCert { epoch, checkpoint_height, checkpoint_hash, agg_sig_bls, bitmap, set_hash } => {
