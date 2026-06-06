@@ -362,11 +362,13 @@ impl From<&NetworkMessage> for pb::ProtoNetworkMessage {
                 index,
                 total,
                 data,
+                session_id,
             } => pb::proto_network_message::Payload::SnapshotChunk(pb::ProtoSnapshotChunk {
                 height: *height,
                 index: *index,
                 total: *total,
                 data: data.clone(),
+                session_id: *session_id,
             }),
             NetworkMessage::Prevote {
                 epoch,
@@ -559,6 +561,7 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                     index: c.index,
                     total: c.total,
                     data: c.data,
+                    session_id: c.session_id,
                 })
             }
             pb::proto_network_message::Payload::Prevote(v) => Ok(NetworkMessage::Prevote {

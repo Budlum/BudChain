@@ -102,7 +102,7 @@ impl Pkcs11Signer {
         if objects.is_empty() {
             return Err("No Ed25519 public key found in HSM slot".to_string());
         }
-        let attr = session.get_attributes(objects[0], &[cryptoki::object::AttributeType::Value.into()])
+        let attr = session.get_attributes(objects[0], &[cryptoki::object::AttributeType::Value])
             .map_err(|e| format!("Failed to read public key value: {}", e))?;
         if let Some(cryptoki::object::Attribute::Value(value)) = attr.first() {
             if value.len() >= 32 {

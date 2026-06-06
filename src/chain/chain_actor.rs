@@ -43,6 +43,8 @@ pub enum ChainCommand {
         u64,
         oneshot::Sender<Option<crate::chain::finality::FinalityCert>>,
     ),
+    GetValidatorAddress(oneshot::Sender<Option<Address>>),
+    GetAggregatorState(oneshot::Sender<crate::chain::finality::AggregatorState>),
     GetStateRoot(u64, oneshot::Sender<Option<String>>),
     AddBalance(Address, u64, oneshot::Sender<()>),
     InitGenesis(Address, oneshot::Sender<()>),
@@ -145,6 +147,20 @@ pub enum ChainCommand {
     },
     SealGlobalHeader(oneshot::Sender<Result<crate::settlement::GlobalBlockHeader, String>>),
     FlushStorage(oneshot::Sender<Result<usize, String>>),
+    SignPrevote {
+        epoch: u64,
+        checkpoint_height: u64,
+        checkpoint_hash: String,
+        voter_id: Address,
+        response: oneshot::Sender<Result<Prevote, String>>,
+    },
+    SignPrecommit {
+        epoch: u64,
+        checkpoint_height: u64,
+        checkpoint_hash: String,
+        voter_id: Address,
+        response: oneshot::Sender<Result<Precommit, String>>,
+    },
 }
 
 #[derive(Clone)]
@@ -244,6 +260,18 @@ impl ChainHandle {
         rx.await.unwrap_or(0)
     }
 
+    pub async fn get_validator_address(&self) -> Option<Address> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetValidatorAddress(tx)).await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_aggregator_state(&self) -> crate::chain::finality::AggregatorState {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetAggregatorState(tx)).await;
+        rx.await.unwrap_or_else(|_| crate::chain::finality::AggregatorState::inactive())
+    }
+
     pub async fn get_base_fee(&self) -> u64 {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetBaseFee(tx)).await;
@@ -289,6 +317,52 @@ impl ChainHandle {
         let _ = self
             .tx
             .send(ChainCommand::HandlePrecommit(vote, res_tx))
+            .await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn sign_prevote(
+        &self,
+        epoch: u64,
+        checkpoint_height: u64,
+        checkpoint_hash: String,
+        voter_id: Address,
+    ) -> Result<Prevote, String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SignPrevote {
+                epoch,
+                checkpoint_height,
+                checkpoint_hash,
+                voter_id,
+                response: res_tx,
+            })
+            .await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn sign_precommit(
+        &self,
+        epoch: u64,
+        checkpoint_height: u64,
+        checkpoint_hash: String,
+        voter_id: Address,
+    ) -> Result<Precommit, String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SignPrecommit {
+                epoch,
+                checkpoint_height,
+                checkpoint_hash,
+                voter_id,
+                response: res_tx,
+            })
             .await;
         res_rx
             .await
@@ -815,6 +889,14 @@ impl ChainActor {
                 ChainCommand::GetMempoolSize(tx) => {
                     let _ = tx.send(self.blockchain.mempool.len());
                 }
+                ChainCommand::GetValidatorAddress(tx) => {
+                    let addr = self.blockchain.consensus().signer().map(|s| s.address());
+                    let _ = tx.send(addr);
+                }
+                ChainCommand::GetAggregatorState(tx) => {
+                    let state = self.blockchain.get_aggregator_state();
+                    let _ = tx.send(state);
+                }
                 ChainCommand::HandleFinalityCert(cert, res_tx) => {
                     let _ = res_tx.send(
                         self.blockchain
@@ -829,6 +911,14 @@ impl ChainActor {
                 ChainCommand::HandlePrecommit(vote, res_tx) => {
                     let result = self.blockchain.handle_precommit(vote);
                     let _ = res_tx.send(result);
+                }
+                ChainCommand::SignPrevote { epoch, checkpoint_height, checkpoint_hash, voter_id, response } => {
+                    let result = self.blockchain.sign_prevote(epoch, checkpoint_height, &checkpoint_hash, &voter_id);
+                    let _ = response.send(result);
+                }
+                ChainCommand::SignPrecommit { epoch, checkpoint_height, checkpoint_hash, voter_id, response } => {
+                    let result = self.blockchain.sign_precommit(epoch, checkpoint_height, &checkpoint_hash, &voter_id);
+                    let _ = response.send(result);
                 }
                 ChainCommand::ImportQcBlob(blob, res_tx) => {
                     let _ = res_tx.send(

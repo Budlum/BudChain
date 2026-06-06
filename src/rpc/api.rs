@@ -168,4 +168,10 @@ pub trait BudlumApi {
 
     #[method(name = "bud_sealGlobalHeader")]
     async fn seal_global_header(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    #[method(name = "bud_health")]
+    async fn health(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    #[method(name = "bud_nodeInfo")]
+    async fn node_info(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 }

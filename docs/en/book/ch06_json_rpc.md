@@ -8,28 +8,48 @@ The RPC server is configured through TOML and exposes Budlum-specific methods wi
 
 ### Configuration File
 
-Typical configuration includes bind address, optional auth settings, CORS origins, allowed IPs, and a global request-rate window.
+Typical configuration includes bind addresses for public and operator listeners, optional auth settings, CORS origins, allowed IPs, trusted proxies, and per-IP rate limiting.
 
-## 2. Observability: Prometheus Metrics
+### Public vs Operator Listeners
 
-Budlum exposes a Prometheus text-format endpoint. Metric descriptors exist for chain, storage, settlement, P2P, and mempool behavior. Most live collectors are not wired yet, and the metrics server currently binds `0.0.0.0:{metrics_port}` independently of the parsed listener string.
+Budlum starts **two separate RPC servers**:
 
-## 3. Supported Methods (`bud_` Prefix)
+| Listener | Bind | Auth | Rate Limit | Body Limit | Max Conn | Purpose |
+| --- | --- | --- | --- | --- | --- | --- |
+| Public | Configurable (e.g. `0.0.0.0:8545`) | API key required (mainnet/testnet) | Per-IP, configurable | 10 MB | 500 | External wallets, dApps |
+| Operator | `127.0.0.1:8546` | None (localhost) | None | 50 MB | 10 | Admin, health checks |
+
+Trusted proxies: Only requests originating from configured proxy IPs may use `X-Forwarded-For` for client IP identification. Unproxied requests use `X-Real-IP`.
+
+## 2. Health and Status Endpoints
+
+| Method | Description |
+| --- | --- |
+| `bud_health` | Returns `status` ("healthy" or "syncing"), `blockHeight`, `peerCount`, and `syncing` flag. |
+| `bud_nodeInfo` | Returns `chainId`, `blockHeight`, `validatorSetHash`, `syncState`, `peerCount`, `peerId`, and `rpcMode` ("public" or "operator"). |
+
+## 3. Observability: Prometheus Metrics
+
+Budlum exposes a Prometheus text-format endpoint at `:{metrics_port}/metrics`. Live collectors are wired for chain height, finalized height, finality lag, blocks produced, transactions processed, reorgs, mempool size/evictions/cleanups, and P2P messages received/peer count.
+
+## 4. Supported Methods (`bud_` Prefix)
 
 Common methods include:
 
--   `bud_blockNumber`
--   `bud_getBalance`
--   `bud_sendRawTransaction`
--   `bud_getTransaction`
--   `bud_getBlockByNumber`
--   `bud_txPrecheck`
--   `bud_submitVerifiedDomainCommitment`
--   `bud_registerBridgeAsset`
--   `bud_lockBridgeTransfer`
--   `bud_mintBridgeTransfer`
--   `bud_burnBridgeTransferWithEvent`
--   `bud_unlockBridgeTransferVerified`
+- `bud_blockNumber`
+- `bud_getBalance`
+- `bud_sendRawTransaction`
+- `bud_getTransaction`
+- `bud_getBlockByNumber`
+- `bud_txPrecheck`
+- `bud_submitVerifiedDomainCommitment`
+- `bud_registerBridgeAsset`
+- `bud_lockBridgeTransfer`
+- `bud_mintBridgeTransfer`
+- `bud_burnBridgeTransferWithEvent`
+- `bud_unlockBridgeTransferVerified`
+- `bud_health`
+- `bud_nodeInfo`
 
 Settlement and bridge methods:
 
@@ -50,31 +70,36 @@ Settlement and bridge methods:
 | `bud_unlockBridgeTransfer` | Disabled raw unlock path. Use `bud_unlockBridgeTransferVerified`. |
 | `bud_unlockBridgeTransferVerified` | Unlocks source funds only after verifying a committed target-domain `BridgeBurned` event Merkle proof. |
 | `bud_sealGlobalHeader` | Seals the current deterministic settlement roots into a global header. |
+| `bud_health` | Health status, block height, peer count, sync state. |
+| `bud_nodeInfo` | Full node identity: chain ID, peer ID, validator set hash, RPC mode. |
 
-## 4. Example Usage
+## 5. Example Usage
 
 ### Query Block Count
 
 Use JSON-RPC over HTTP to call `bud_blockNumber`.
 
-### Query Balance
+### Health Check
 
-Call `bud_getBalance` with an account public key or address.
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","method":"bud_health","params":[],"id":1}' \
+  http://localhost:8545
+```
 
 ### BudZKVM ContractCall Precheck
 
 `bud_txPrecheck` validates transaction shape and BudZKVM bytecode alignment before the user pays to propagate or include the transaction.
 
-## 5. Architecture and Security
+## 6. Architecture and Security
 
-1.  **Transaction validation:** `bud_sendRawTransaction` checks size and cryptographic signature before gossip.
-2.  **Config-based auth and rate limiting:** TOML fields `auth_required`, `api_key_env`, `allowed_ips`, `cors_origins`, and `rate_limit_per_minute` are enforced by the RPC HTTP middleware. Auth accepts `x-api-key` or `Authorization: Bearer ...`.
-3.  **ContractCall shape checks:** precheck and mempool validation reject empty or misaligned BudZKVM bytecode.
-4.  **Verified settlement only:** raw domain commitments, bridge burns, and bridge unlocks are rejected by RPC. Settlement-changing bridge return paths require committed domain events and Merkle proofs.
-
-## 6. Mainnet Boundaries
-
-Config V2 parses `public_listener`, `operator_listener`, and `trusted_proxies`, but runtime currently starts one HTTP RPC listener. Allowed-IP matching trusts `x-forwarded-for` or `x-real-ip` directly, so it must not be exposed behind arbitrary proxies. Separate public/operator servers, trusted-proxy enforcement, per-client quotas, health endpoints, and explicit connection/body limits remain Mainnet work.
+1. **Transaction validation:** `bud_sendRawTransaction` checks size and cryptographic signature before gossip.
+2. **Per-IP rate limiting:** Each client IP gets its own 60-second sliding window token bucket. Different IPs do not share rate limits.
+3. **Trusted proxy enforcement:** `X-Forwarded-For` is only honored from IPs in the `trusted_proxies` configuration list. Otherwise, `X-Real-IP` or a direct remote address is used.
+4. **Config-based auth and rate limiting:** TOML fields `auth_required`, `api_key_env`, `allowed_ips`, `cors_origins`, `trusted_proxies`, and `rate_limit_per_minute` are enforced by the RPC HTTP middleware. Auth accepts `x-api-key` or `Authorization: Bearer ...`.
+5. **Body and connection limits:** Public server limits: 10MB body, 500 connections. Operator server limits: 50MB body, 10 connections.
+6. **ContractCall shape checks:** precheck and mempool validation reject empty or misaligned BudZKVM bytecode.
+7. **Verified settlement only:** raw domain commitments, bridge burns, and bridge unlocks are rejected by RPC. Settlement-changing bridge return paths require committed domain events and Merkle proofs.
 
 ## 7. How Realistic Is `bud_txPrecheck`?
 

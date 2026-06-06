@@ -3,4 +3,4 @@ pub mod server;
 pub mod tests;
 
 pub use api::BudlumApiServer;
-pub use server::{RpcSecurityConfig, RpcServer};
+pub use server::{RpcMode, RpcSecurityConfig, RpcServer};

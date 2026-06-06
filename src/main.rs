@@ -15,7 +15,7 @@ use budlum_core::domain::{
 };
 use budlum_core::network::node::Node;
 use budlum_core::network::protocol::NetworkMessage;
-use budlum_core::rpc::{RpcSecurityConfig, RpcServer};
+use budlum_core::rpc::{RpcMode, RpcSecurityConfig, RpcServer};
 use budlum_core::storage::db::Storage;
 
 use clap::Parser;
@@ -427,13 +427,16 @@ async fn main() {
         )
     });
 
+    let metrics = Arc::new(budlum_core::core::metrics::Metrics::new());
+
     let mut blockchain = Blockchain::new_with_genesis(
         consensus.clone(),
         storage,
         chain_id,
         pruning_manager,
         genesis_config,
-    );
+    )
+    .with_metrics(metrics.clone());
 
     let domain_id = 1u32;
     let (domain_kind, adapter_name, min_conf) = match consensus_type {
@@ -517,7 +520,17 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let mut node = Node::new_with_bootstrap(chain.clone(), bootstraps.clone()).unwrap();
+    // Load or generate persistent P2P identity
+    let identity_key =
+        budlum_core::network::node::load_or_generate_identity_key(config.p2p_identity_file.as_deref());
+
+    let mut node = Node::with_key(chain.clone(), identity_key, true)
+        .unwrap()
+        .with_identity(config.p2p_identity_file.clone())
+        .with_dns_seeds(config.dns_seeds.clone())
+        .with_banned_peer_db(config.banned_peer_db.clone())
+        .with_bootstrap_peers(bootstraps.clone())
+        .with_metrics(metrics.clone());
     node.apply_network_security(network);
 
     for addr in &bootstraps {
@@ -540,7 +553,6 @@ async fn main() {
         .or(local_signer_address);
 
     if config.rpc_enabled {
-        let rpc_addr = format!("{}:{}", config.rpc_host, config.rpc_port);
         let rpc_security = match RpcSecurityConfig::from_env(
             config.rpc_auth_required,
             config.rpc_api_key_env.as_deref(),
@@ -548,25 +560,60 @@ async fn main() {
             config.rpc_cors_origins.clone(),
             config.rpc_rate_limit_per_minute,
         ) {
-            Ok(security) => security,
+            Ok(mut security) => {
+                security.trusted_proxies = config.rpc_trusted_proxies.clone();
+                security.max_request_body_size = Some(10 * 1024 * 1024);
+                security.max_connections = Some(500);
+                security
+            }
             Err(e) => {
                 eprintln!("RPC configuration error: {}", e);
                 return;
             }
         };
-        let rpc_server = RpcServer::with_security(chain.clone(), node.get_client(), rpc_security);
+
+        // Public RPC listener
+        let public_addr = config
+            .rpc_public_listener
+            .clone()
+            .unwrap_or_else(|| format!("{}:{}", config.rpc_host, config.rpc_port));
+        let pub_server = RpcServer::with_security_and_mode(
+            chain.clone(),
+            node.get_client(),
+            rpc_security.clone(),
+            RpcMode::Public,
+        );
+        let pub_addr = public_addr.clone();
         tokio::spawn(async move {
-            if let Err(e) = rpc_server.run(rpc_addr.clone()).await {
-                eprintln!("RPC Server Error on {}: {}", rpc_addr, e);
+            if let Err(e) = pub_server.run(pub_addr.clone()).await {
+                eprintln!("Public RPC Server Error on {}: {}", pub_addr, e);
             } else {
-                println!("JSON-RPC Server running on {}", rpc_addr);
+                println!("Public JSON-RPC Server running on {}", pub_addr);
             }
         });
+
+        // Operator RPC listener (localhost-only, no auth by default)
+        if let Some(operator_addr) = config.rpc_operator_listener.as_ref() {
+            let op_security = RpcSecurityConfig::operator_default();
+            let op_server = RpcServer::with_security_and_mode(
+                chain.clone(),
+                node.get_client(),
+                op_security,
+                RpcMode::Operator,
+            );
+            let op_addr = operator_addr.clone();
+            tokio::spawn(async move {
+                if let Err(e) = op_server.run(op_addr.clone()).await {
+                    eprintln!("Operator RPC Server Error on {}: {}", op_addr, e);
+                } else {
+                    println!("Operator JSON-RPC Server running on {}", op_addr);
+                }
+            });
+        }
     } else {
         println!("JSON-RPC Server disabled by config");
     }
 
-    let metrics = budlum_core::core::metrics::Metrics::new();
     let metrics_clone = metrics.clone();
     let metrics_port = config.metrics_port;
     tokio::spawn(async move {

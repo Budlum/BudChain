@@ -164,6 +164,7 @@ message ProtoSnapshotChunk {
     uint32 index = 2;
     uint32 total = 3;
     bytes data = 4;
+    uint64 session_id = 5;
 }
 
 message ProtoPrevote {

@@ -1,0 +1,35 @@
+# ── Prometheus Scrape Config for Budlum Core ──────────────
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: budlum-node1
+    static_configs:
+      - targets: ["node1:9090"]
+        labels:
+          node: "node1"
+          network: "devnet"
+
+  - job_name: budlum-node2
+    static_configs:
+      - targets: ["node2:9090"]
+        labels:
+          node: "node2"
+          network: "devnet"
+
+  - job_name: budlum-node3
+    static_configs:
+      - targets: ["node3:9090"]
+        labels:
+          node: "node3"
+          network: "devnet"
+
+  - job_name: budlum-node4
+    static_configs:
+      - targets: ["node4:9090"]
+        labels:
+          node: "node4"
+          network: "devnet"

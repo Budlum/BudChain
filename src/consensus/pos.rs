@@ -542,6 +542,18 @@ impl ConsensusEngine for PoSEngine {
     fn signer(&self) -> Option<&dyn ConsensusSigner> {
         self.signer.as_ref().map(|s| s.as_ref())
     }
+    fn bls_secret_key(&self) -> Option<bls12_381::Scalar> {
+        self.validator_keys
+            .as_ref()
+            .and_then(|k| k.bls_key.as_ref())
+            .map(|b| b.secret_key)
+    }
+    fn bls_public_key(&self) -> Option<Vec<u8>> {
+        self.validator_keys
+            .as_ref()
+            .and_then(|k| k.bls_key.as_ref())
+            .map(|b| b.public_key.clone())
+    }
     fn info(&self) -> String {
         format!(
             "PoS (min_stake: {}, checkpoints: {})",

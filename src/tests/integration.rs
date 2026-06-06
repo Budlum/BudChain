@@ -11,7 +11,9 @@ mod integration_tests {
     use crate::core::transaction::Transaction;
     use crate::crypto::primitives::KeyPair;
     use crate::execution::executor::Executor;
-    use crate::chain::finality::{Precommit, Prevote, is_checkpoint_height};
+    use crate::chain::finality::{FinalityAggregator, ValidatorEntry, ValidatorSetSnapshot, Precommit, Prevote, is_checkpoint_height, sign_bls, verify_bls_sig, checkpoint_signing_message};
+    use crate::crypto::primitives::BlsKeypair;
+    use crate::crypto::primitives::ValidatorKeys;
     use std::sync::Arc;
 
     #[test]
@@ -623,7 +625,7 @@ mod integration_tests {
             sig_bls: vec![],
         };
         let result = bc.handle_precommit(vote2);
-        assert!(!result.is_err(), "single validator should reach both prevote and precommit quorum");
+        assert!(result.is_ok(), "single validator should reach both prevote and precommit quorum");
     }
 
     #[test]
@@ -654,5 +656,824 @@ mod integration_tests {
         let result = bc.handle_prevote(wrong_vote);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("hash mismatch"));
+    }
+
+    fn make_validator_keys_with_bls() -> ValidatorKeys {
+        let mut keys = ValidatorKeys::generate().unwrap();
+        // Ensure BLS key exists
+        if keys.bls_key.is_none() {
+            keys.bls_key = Some(BlsKeypair::generate().unwrap());
+        }
+        keys
+    }
+
+    fn make_validator_snapshot(addrs: &[(Address, u64)], bls_keys: &[BlsKeypair]) -> ValidatorSetSnapshot {
+        let entries: Vec<ValidatorEntry> = addrs.iter().enumerate().map(|(i, (addr, stake))| {
+            let pop_msg = crate::chain::finality::pop_signing_message(addr, &bls_keys[i].public_key);
+            let pop_sig = sign_bls(&bls_keys[i].secret_key, &pop_msg);
+            ValidatorEntry {
+                address: *addr,
+                stake: *stake,
+                bls_public_key: bls_keys[i].public_key.clone(),
+                pop_signature: pop_sig,
+                pq_public_key: vec![],
+            }
+        }).collect();
+        ValidatorSetSnapshot::new(1, entries)
+    }
+
+    #[test]
+    fn test_bls_sign_prevote_and_verify() {
+        let bls_key = BlsKeypair::generate().unwrap();
+        let voter = Address::from([1u8; 32]);
+
+        let vote = Prevote {
+            epoch: 1,
+            checkpoint_height: 10,
+            checkpoint_hash: "test_cp_hash".to_string(),
+            voter_id: voter,
+            sig_bls: vec![],
+        };
+
+        let msg = vote.signing_message();
+        let sig = sign_bls(&bls_key.secret_key, &msg);
+        assert_eq!(sig.len(), 48);
+
+        let result = verify_bls_sig(&bls_key.public_key, &msg, &sig);
+        assert!(result.is_ok());
+
+        // Wrong message should fail verification
+        let wrong_msg = b"wrong message";
+        let result = verify_bls_sig(&bls_key.public_key, wrong_msg, &sig);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_bls_sign_precommit_and_verify() {
+        let bls_key = BlsKeypair::generate().unwrap();
+
+        let msg = checkpoint_signing_message(1, 10, "test_cp_hash");
+        let sig = sign_bls(&bls_key.secret_key, &msg);
+        assert_eq!(sig.len(), 48);
+
+        assert!(verify_bls_sig(&bls_key.public_key, &msg, &sig).is_ok());
+    }
+
+    #[test]
+    fn test_bls_signer_in_pos_engine() {
+        let keys = make_validator_keys_with_bls();
+        let bls_sk = keys.bls_key.as_ref().unwrap().secret_key;
+        let bls_pk = keys.bls_key.as_ref().unwrap().public_key.clone();
+
+        let engine = PoSEngine::new(PoSConfig::default(), Some(keys));
+
+        let retrieved_sk = engine.bls_secret_key();
+        assert!(retrieved_sk.is_some());
+        assert_eq!(retrieved_sk.unwrap(), bls_sk);
+
+        let retrieved_pk = engine.bls_public_key();
+        assert!(retrieved_pk.is_some());
+        assert_eq!(retrieved_pk.unwrap(), bls_pk);
+    }
+
+    #[test]
+    fn test_blockchain_sign_prevote_with_bls() {
+        let keys = make_validator_keys_with_bls();
+        let bls_pk = keys.bls_key.as_ref().unwrap().public_key.clone();
+        let voter = Address::from(keys.sig_key.public_key_bytes());
+
+        let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
+        let bc = Blockchain::new(consensus, None, 1337, None);
+
+        let prevote = bc.sign_prevote(1, 10, "test_cp_hash", &voter).unwrap();
+
+        assert_eq!(prevote.epoch, 1);
+        assert_eq!(prevote.checkpoint_height, 10);
+        assert_eq!(prevote.checkpoint_hash, "test_cp_hash");
+        assert_eq!(prevote.voter_id, voter);
+        assert_eq!(prevote.sig_bls.len(), 48);
+
+        // Verify the BLS signature
+        let msg = prevote.signing_message();
+        assert!(verify_bls_sig(&bls_pk, &msg, &prevote.sig_bls).is_ok());
+    }
+
+    #[test]
+    fn test_blockchain_sign_precommit_with_bls() {
+        let keys = make_validator_keys_with_bls();
+        let bls_pk = keys.bls_key.as_ref().unwrap().public_key.clone();
+        let voter = Address::from(keys.sig_key.public_key_bytes());
+
+        let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
+        let bc = Blockchain::new(consensus, None, 1337, None);
+
+        let precommit = bc.sign_precommit(1, 10, "test_cp_hash", &voter).unwrap();
+
+        assert_eq!(precommit.epoch, 1);
+        assert_eq!(precommit.checkpoint_height, 10);
+        assert_eq!(precommit.checkpoint_hash, "test_cp_hash");
+        assert_eq!(precommit.voter_id, voter);
+        assert_eq!(precommit.sig_bls.len(), 48);
+
+        let msg = precommit.signing_message();
+        assert!(verify_bls_sig(&bls_pk, &msg, &precommit.sig_bls).is_ok());
+    }
+
+    #[test]
+    fn test_full_finality_flow_with_bls_signatures() {
+        let n_validators = 4;
+        let mut bls_keys = Vec::new();
+        let mut addrs = Vec::new();
+
+        for i in 0..n_validators {
+            let bls_key = BlsKeypair::generate().unwrap();
+            let mut addr_bytes = [0u8; 32];
+            addr_bytes[0] = (i + 1) as u8;
+            let addr = Address::from(addr_bytes);
+            bls_keys.push(bls_key);
+            addrs.push((addr, 1000u64));
+        }
+
+        let snapshot = make_validator_snapshot(&addrs, &bls_keys);
+
+        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into());
+        agg.set_validator_snapshot(snapshot.clone());
+
+        // 3 out of 4 validators send BLS-signed prevotes (meets 2/3 quorum)
+        for i in 0..3 {
+            let vote = Prevote {
+                epoch: 1,
+                checkpoint_height: 10,
+                checkpoint_hash: "cp_hash".into(),
+                voter_id: addrs[i].0,
+                sig_bls: vec![],
+            };
+            let msg = vote.signing_message();
+            let sig = sign_bls(&bls_keys[i].secret_key, &msg);
+
+            let signed_vote = Prevote {
+                sig_bls: sig,
+                ..vote
+            };
+            agg.add_prevote(signed_vote).unwrap();
+        }
+
+        assert!(agg.prevote_quorum_reached);
+
+        // 3 validators send BLS-signed precommits
+        for i in 0..3 {
+            let pc = Precommit {
+                epoch: 1,
+                checkpoint_height: 10,
+                checkpoint_hash: "cp_hash".into(),
+                voter_id: addrs[i].0,
+                sig_bls: vec![],
+            };
+            let msg = pc.signing_message();
+            let sig = sign_bls(&bls_keys[i].secret_key, &msg);
+
+            let signed_pc = Precommit {
+                sig_bls: sig,
+                ..pc
+            };
+            agg.add_precommit(signed_pc).unwrap();
+        }
+
+        assert!(agg.precommit_quorum_reached);
+
+        let cert = agg.try_produce_cert().unwrap();
+        assert_eq!(cert.epoch, 1);
+        assert_eq!(cert.checkpoint_height, 10);
+        assert_eq!(cert.checkpoint_hash, "cp_hash");
+        assert_eq!(cert.signer_count(4), 3);
+
+        // Verify the produced certificate
+        assert!(cert.verify(&snapshot).is_ok());
+
+        // Verify signer bitmap
+        for (i, (addr, _stake)) in addrs.iter().enumerate().take(3) {
+            let idx = snapshot.validator_index(addr).unwrap();
+            let byte_idx = idx / 8;
+            let bit_idx = idx % 8;
+            assert!(cert.bitmap[byte_idx] & (1 << bit_idx) != 0,
+                "Validator {} should be in bitmap", i);
+        }
+    }
+
+    #[test]
+    fn test_aggregator_state_reporting() {
+        let bls_key = BlsKeypair::generate().unwrap();
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes[0] = 1;
+        let addr = Address::from(addr_bytes);
+
+        let snapshot = make_validator_snapshot(&[(addr, 2000)], std::slice::from_ref(&bls_key));
+
+        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into());
+        agg.set_validator_snapshot(snapshot);
+
+        let state = agg.get_state();
+        assert!(state.active);
+        assert_eq!(state.epoch, 1);
+        assert_eq!(state.checkpoint_height, 10);
+        assert!(!state.prevote_quorum_reached);
+        assert!(!state.precommit_quorum_reached);
+        assert_eq!(state.prevote_count, 0);
+        assert_eq!(state.precommit_count, 0);
+
+        // Add prevote
+        let vote = Prevote {
+            epoch: 1,
+            checkpoint_height: 10,
+            checkpoint_hash: "cp_hash".into(),
+            voter_id: addr,
+            sig_bls: vec![],
+        };
+        let msg = vote.signing_message();
+        let sig = sign_bls(&bls_key.secret_key, &msg);
+        agg.add_prevote(Prevote { sig_bls: sig, ..vote }).unwrap();
+
+        let state = agg.get_state();
+        assert!(state.prevote_quorum_reached);
+        assert_eq!(state.prevote_count, 1);
+    }
+
+    #[test]
+    fn test_byzantine_equivocating_prevote_rejected() {
+        let bls_key = BlsKeypair::generate().unwrap();
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes[0] = 1;
+        let addr = Address::from(addr_bytes);
+
+        let snapshot = make_validator_snapshot(&[(addr, 1000)], std::slice::from_ref(&bls_key));
+
+        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into());
+        agg.set_validator_snapshot(snapshot);
+
+        let vote1 = Prevote {
+            epoch: 1,
+            checkpoint_height: 10,
+            checkpoint_hash: "cp_hash".into(),
+            voter_id: addr,
+            sig_bls: vec![],
+        };
+        let msg = vote1.signing_message();
+        let sig = sign_bls(&bls_key.secret_key, &msg);
+
+        agg.add_prevote(Prevote { sig_bls: sig.clone(), ..vote1.clone() }).unwrap();
+
+        // Duplicate prevote from same validator should be rejected
+        let result = agg.add_prevote(Prevote { sig_bls: sig, ..vote1 });
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Duplicate"));
+    }
+
+    #[test]
+    fn test_precommit_before_prevote_quorum_rejected() {
+        let bls_key = BlsKeypair::generate().unwrap();
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes[0] = 1;
+        let addr = Address::from(addr_bytes);
+
+        let snapshot = make_validator_snapshot(&[(addr, 1000)], std::slice::from_ref(&bls_key));
+
+        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into());
+        agg.set_validator_snapshot(snapshot);
+
+        let pc = Precommit {
+            epoch: 1,
+            checkpoint_height: 10,
+            checkpoint_hash: "cp_hash".into(),
+            voter_id: addr,
+            sig_bls: vec![],
+        };
+        let msg = pc.signing_message();
+        let sig = sign_bls(&bls_key.secret_key, &msg);
+
+        let result = agg.add_precommit(Precommit { sig_bls: sig, ..pc });
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Cannot precommit before prevote quorum"));
+    }
+
+    #[test]
+    fn test_finality_cert_rejects_tampered_aggregate_signature() {
+        let n = 4;
+        let mut bls_keys = Vec::new();
+        let mut addrs = Vec::new();
+        for i in 0..n {
+            let bls_key = BlsKeypair::generate().unwrap();
+            let mut addr_bytes = [0u8; 32];
+            addr_bytes[0] = (i + 1) as u8;
+            addrs.push((Address::from(addr_bytes), 1000u64));
+            bls_keys.push(bls_key);
+        }
+        let snapshot = make_validator_snapshot(&addrs, &bls_keys);
+
+        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into());
+        agg.set_validator_snapshot(snapshot.clone());
+
+        for i in 0..3 {
+            let vote = Prevote { epoch: 1, checkpoint_height: 10, checkpoint_hash: "cp_hash".into(), voter_id: addrs[i].0, sig_bls: vec![] };
+            let msg = vote.signing_message();
+            let sig = sign_bls(&bls_keys[i].secret_key, &msg);
+            agg.add_prevote(Prevote { sig_bls: sig, ..vote }).unwrap();
+        }
+
+        for i in 0..3 {
+            let pc = Precommit { epoch: 1, checkpoint_height: 10, checkpoint_hash: "cp_hash".into(), voter_id: addrs[i].0, sig_bls: vec![] };
+            let msg = pc.signing_message();
+            let sig = sign_bls(&bls_keys[i].secret_key, &msg);
+            agg.add_precommit(Precommit { sig_bls: sig, ..pc }).unwrap();
+        }
+
+        let mut cert = agg.try_produce_cert().unwrap();
+        assert!(cert.verify(&snapshot).is_ok());
+
+        // Tamper with the aggregated signature (modify middle bytes of the G1 compressed point)
+        if cert.agg_sig_bls.len() > 16 {
+            cert.agg_sig_bls[10] ^= 0xFF;
+        }
+        let result = cert.verify(&snapshot);
+        assert!(result.is_err(),
+            "Tampered cert should fail verification, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_no_bls_key_returns_none() {
+        // PoW engine has no BLS key
+        let engine = PoWEngine::new(0);
+        assert!(engine.bls_secret_key().is_none());
+        assert!(engine.bls_public_key().is_none());
+
+        // PoA engine without keys has no BLS key
+        let poa = PoAEngine::new(PoAConfig::default(), None);
+        assert!(poa.bls_secret_key().is_none());
+    }
+
+    #[test]
+    fn test_sign_prevote_fails_without_bls_key() {
+        let keypair = KeyPair::generate().unwrap();
+        let voter = Address::from(keypair.public_key_bytes());
+
+        // PoW has no BLS key
+        let consensus = Arc::new(PoWEngine::new(0));
+        let bc = Blockchain::new(consensus, None, 1337, None);
+
+        let result = bc.sign_prevote(1, 10, "test", &voter);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No BLS secret key"));
+    }
+
+    // --- P2P Hardening Tests ---
+
+    #[test]
+    fn test_peer_manager_durable_ban_roundtrip() {
+        use crate::network::peer_manager::PeerManager;
+        let mut pm = PeerManager::new();
+
+        let banned_ids: Vec<String> = (0..3)
+            .map(|_| libp2p::PeerId::random().to_base58())
+            .collect();
+
+        pm.reload_banned_peers(&banned_ids);
+
+        let persisted = pm.get_persisted_banned_peers();
+        assert_eq!(persisted.len(), 3);
+        for id in &banned_ids {
+            let pid = id.parse::<libp2p::PeerId>().unwrap();
+            assert!(pm.is_banned(&pid));
+        }
+    }
+
+    #[test]
+    fn test_peer_manager_unban_clears_ban() {
+        use crate::network::peer_manager::PeerManager;
+        let mut pm = PeerManager::new();
+        let pid = libp2p::PeerId::random();
+
+        let banned = vec![pid.to_base58()];
+        pm.reload_banned_peers(&banned);
+        assert!(pm.is_banned(&pid));
+
+        pm.unban_peer(&pid);
+        assert!(!pm.is_banned(&pid));
+        assert_eq!(pm.get_score(&pid), 0);
+    }
+
+    #[test]
+    fn test_persistent_identity_load_or_generate() {
+        use crate::network::node::load_or_generate_identity_key;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test-node-id.key");
+        let path_str = path.to_str().unwrap();
+
+        // First call: generates and saves
+        let key1 = load_or_generate_identity_key(Some(path_str));
+        let peer_id1 = libp2p::PeerId::from(key1.public());
+
+        assert!(path.exists());
+
+        // Second call: loads existing key
+        let key2 = load_or_generate_identity_key(Some(path_str));
+        let peer_id2 = libp2p::PeerId::from(key2.public());
+
+        assert_eq!(peer_id1, peer_id2,
+            "Persistent identity should survive reload");
+    }
+
+    #[test]
+    fn test_dns_seed_resolution_resolves_addresses() {
+        use crate::network::node::resolve_dns_seeds;
+
+        let addrs = resolve_dns_seeds(&["localhost".to_string()], 4001);
+        assert!(!addrs.is_empty(), "localhost should resolve");
+        for addr in &addrs {
+            assert!(addr.starts_with("/ip4/") || addr.starts_with("/ip6/"));
+        }
+    }
+
+    #[test]
+    fn test_dns_seed_resolution_handles_invalid() {
+        use crate::network::node::resolve_dns_seeds;
+
+        let addrs = resolve_dns_seeds(&["invalid.nonexistent.domain.test".to_string()], 4001);
+        // Should not panic, returns empty
+        assert!(addrs.is_empty());
+    }
+
+    #[test]
+    fn test_rpc_operator_default_local_only() {
+        let config = crate::rpc::RpcSecurityConfig::operator_default();
+        assert!(config.allowed_ips.contains(&"127.0.0.1".to_string()));
+        assert!(config.allowed_ips.contains(&"::1".to_string()));
+        assert!(!config.auth_required);
+        assert!(config.max_connections.is_some());
+        assert!(config.max_connections.unwrap() > 0);
+    }
+
+    // --- V2 Snapshot / Replay Equivalence Tests ---
+
+    #[test]
+    fn test_v2_snapshot_preserves_consensus_metadata() {
+        use crate::chain::snapshot::{StateSnapshotV2, StateSnapshotV2Params};
+        use crate::core::account::AccountState;
+
+        let mut state = AccountState::new();
+        let addr = Address::from([1u8; 32]);
+        state.add_balance(&addr, 5000);
+        state.epoch_index = 42;
+        state.base_fee = 15;
+        state.block_reward = 100;
+        state.bridge_root = [0xAB; 32];
+        state.message_root = [0xCD; 32];
+
+        let params = StateSnapshotV2Params {
+            height: 200,
+            block_hash: "block_hash_v2".into(),
+            genesis_hash: "genesis_hash".into(),
+            chain_id: 1337,
+            finalized_height: 100,
+            finalized_hash: "final_hash".into(),
+            finality_certificates: vec![],
+        };
+
+        let v2 = StateSnapshotV2::from_state(&state, params);
+        assert_eq!(v2.schema_version, 2);
+        assert_eq!(v2.height, 200);
+        assert_eq!(v2.epoch_index, 42);
+        assert_eq!(v2.base_fee, 15);
+        assert_eq!(v2.block_reward, 100);
+        assert_eq!(v2.bridge_root, [0xAB; 32]);
+        assert_eq!(v2.message_root, [0xCD; 32]);
+        assert!(v2.verify());
+    }
+
+    #[test]
+    fn test_v2_snapshot_restore_replay_equivalent() {
+        use crate::chain::snapshot::{StateSnapshotV2, StateSnapshotV2Params};
+        use crate::core::account::AccountState;
+
+        let mut original = AccountState::new();
+        let addr = Address::from([1u8; 32]);
+        original.add_balance(&addr, 10000);
+        original.epoch_index = 10;
+        original.base_fee = 20;
+        original.block_reward = 75;
+        original.unbonding_queue.push(crate::core::account::UnbondingEntry {
+            address: addr,
+            amount: 500,
+            release_epoch: 15,
+        });
+
+        let params = StateSnapshotV2Params {
+            height: 100,
+            block_hash: "h".into(),
+            genesis_hash: "g".into(),
+            chain_id: 1,
+            finalized_height: 50,
+            finalized_hash: "fh".into(),
+            finality_certificates: vec![],
+        };
+
+        let v2 = StateSnapshotV2::from_state(&original, params);
+        let mut restored = AccountState::from_snapshot_v2(&v2);
+
+        assert_eq!(restored.epoch_index, original.epoch_index);
+        assert_eq!(restored.base_fee, original.base_fee);
+        assert_eq!(restored.block_reward, original.block_reward);
+        assert_eq!(restored.unbonding_queue.len(), 1);
+        assert_eq!(restored.unbonding_queue[0].amount, 500);
+        assert_eq!(restored.unbonding_queue[0].release_epoch, 15);
+        assert_eq!(restored.get_balance(&addr), 10000);
+
+        let state_root_original = original.calculate_state_root();
+        let state_root_restored = restored.calculate_state_root();
+        assert_eq!(state_root_original, state_root_restored,
+            "State root must be identical after V2 snapshot roundtrip");
+    }
+
+    #[test]
+    fn test_v1_snapshot_roundtrip() {
+        use crate::chain::snapshot::StateSnapshot;
+
+        let mut state = crate::core::account::AccountState::new();
+        let addr = Address::from([1u8; 32]);
+        state.add_balance(&addr, 3000);
+
+        let snapshot = StateSnapshot::from_state(
+            50,
+            "test_hash".into(),
+            1337,
+            &state,
+            10,
+            "fin_hash".into(),
+        );
+
+        assert!(snapshot.verify());
+        let bytes = snapshot.to_bytes();
+        let parsed = StateSnapshot::from_bytes(&bytes).unwrap();
+        assert!(parsed.verify());
+        assert_eq!(parsed.height, 50);
+    }
+
+    #[test]
+    fn test_v2_snapshot_serialization_roundtrip() {
+        use crate::chain::snapshot::{StateSnapshotV2, StateSnapshotV2Params};
+
+        let mut state = crate::core::account::AccountState::new();
+        state.add_balance(&Address::from([2u8; 32]), 7000);
+
+        let params = StateSnapshotV2Params {
+            height: 300,
+            block_hash: "bh".into(),
+            genesis_hash: "gh".into(),
+            chain_id: 42,
+            finalized_height: 200,
+            finalized_hash: "fh".into(),
+            finality_certificates: vec![],
+        };
+
+        let v2 = StateSnapshotV2::from_state(&state, params);
+        let bytes = v2.to_bytes();
+        let parsed = StateSnapshotV2::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.schema_version, 2);
+        assert_eq!(parsed.height, 300);
+        assert_eq!(parsed.chain_id, 42);
+        assert!(parsed.verify());
+    }
+
+    #[test]
+    fn test_pruning_manager_v2_save_and_load() {
+        use crate::chain::snapshot::{PruningManager, StateSnapshotV2, StateSnapshotV2Params};
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let pm = PruningManager::new(100, 10, dir.path().to_str().unwrap().to_string());
+
+        let mut state = crate::core::account::AccountState::new();
+        state.add_balance(&Address::from([3u8; 32]), 5000);
+
+        let params = StateSnapshotV2Params {
+            height: 100,
+            block_hash: "test".into(),
+            genesis_hash: "gen".into(),
+            chain_id: 1337,
+            finalized_height: 50,
+            finalized_hash: "fin".into(),
+            finality_certificates: vec![],
+        };
+
+        let v2 = StateSnapshotV2::from_state(&state, params);
+        pm.save_snapshot_v2(&v2).unwrap();
+
+        let loaded = pm.load_latest_snapshot_v2().unwrap().unwrap();
+        assert_eq!(loaded.height, 100);
+        assert_eq!(loaded.chain_id, 1337);
+        assert!(loaded.verify());
+    }
+
+    // --- RpcMode / Health Endpoint Tests ---
+
+    #[test]
+    fn test_rpc_mode_public_vs_operator_defaults() {
+        use crate::rpc::RpcSecurityConfig;
+
+        let public_default = RpcSecurityConfig::default();
+        let operator_default = RpcSecurityConfig::operator_default();
+
+        assert!(operator_default.allowed_ips.contains(&"127.0.0.1".to_string()));
+        assert!(!operator_default.auth_required);
+        assert_eq!(operator_default.max_connections, Some(10));
+        assert!(operator_default.max_request_body_size.is_some());
+
+        assert!(public_default.allowed_ips.is_empty());
+        assert!(!public_default.auth_required);
+        assert_eq!(public_default.max_connections, None);
+    }
+
+    #[test]
+    fn test_rpc_security_config_with_body_limits() {
+        use crate::rpc::RpcSecurityConfig;
+
+        let config = RpcSecurityConfig {
+            max_request_body_size: Some(1024),
+            max_connections: Some(50),
+            ..Default::default()
+        };
+
+        assert_eq!(config.max_request_body_size, Some(1024));
+        assert_eq!(config.max_connections, Some(50));
+    }
+
+    // --- mDNS Policy / Node Construction Tests ---
+
+    #[tokio::test]
+    async fn test_mdns_policy_flag_is_stored() {
+        use crate::network::node::Node;
+        use crate::chain::blockchain::Blockchain;
+        use crate::consensus::pow::PoWEngine;
+
+        let consensus = std::sync::Arc::new(PoWEngine::new(0));
+        let bc = Blockchain::new(consensus, None, 1337, None);
+        let (_actor, handle) = crate::chain::chain_actor::ChainActor::new(bc);
+
+        let mdns_on = Node::with_key(
+            handle.clone(),
+            libp2p::identity::Keypair::generate_ed25519(),
+            true,
+        ).unwrap();
+        assert!(mdns_on.mdns_enabled);
+
+        let mdns_off = Node::with_key(
+            handle,
+            libp2p::identity::Keypair::generate_ed25519(),
+            false,
+        ).unwrap();
+        assert!(!mdns_off.mdns_enabled);
+    }
+
+    #[tokio::test]
+    async fn test_node_with_identity_sets_path() {
+        use crate::network::node::Node;
+        use crate::chain::blockchain::Blockchain;
+        use crate::consensus::pow::PoWEngine;
+
+        let consensus = std::sync::Arc::new(PoWEngine::new(0));
+        let bc = Blockchain::new(consensus, None, 1337, None);
+        let (_actor, handle) = crate::chain::chain_actor::ChainActor::new(bc);
+
+        let node = Node::new(handle).unwrap()
+            .with_identity(Some("/tmp/test-id.key".to_string()));
+
+        assert!(node.identity_path.is_some());
+        assert_eq!(
+            node.identity_path.unwrap().to_str().unwrap(),
+            "/tmp/test-id.key"
+        );
+    }
+
+    // --- Metrics Wiring Tests ---
+
+    #[test]
+    fn test_blockchain_emit_chain_metrics_updates_gauges() {
+        use crate::core::metrics::Metrics;
+        use crate::chain::blockchain::Blockchain;
+        use crate::consensus::pow::PoWEngine;
+        use std::sync::Arc;
+
+        let consensus = Arc::new(PoWEngine::new(0));
+        let metrics = Arc::new(Metrics::new());
+        let bc = Blockchain::new(consensus.clone(), None, 1337, None)
+            .with_metrics(metrics.clone());
+
+        bc.emit_chain_metrics();
+        assert_eq!(metrics.chain_height.get(), 1); // genesis block
+        assert_eq!(metrics.blocks_produced.get(), 1);
+    }
+
+    #[test]
+    fn test_blockchain_emit_tx_processed_increments_counter() {
+        use crate::core::metrics::Metrics;
+        use crate::chain::blockchain::Blockchain;
+        use crate::consensus::pow::PoWEngine;
+        use std::sync::Arc;
+
+        let consensus = Arc::new(PoWEngine::new(0));
+        let metrics = Arc::new(Metrics::new());
+        let bc = Blockchain::new(consensus.clone(), None, 1337, None)
+            .with_metrics(metrics.clone());
+
+        bc.emit_tx_processed(5);
+        assert_eq!(metrics.transactions_processed.get(), 5);
+
+        bc.emit_tx_processed(3);
+        assert_eq!(metrics.transactions_processed.get(), 8);
+    }
+
+    #[test]
+    fn test_blockchain_emit_reorg_increments() {
+        use crate::core::metrics::Metrics;
+        use crate::chain::blockchain::Blockchain;
+        use crate::consensus::pow::PoWEngine;
+        use std::sync::Arc;
+
+        let consensus = Arc::new(PoWEngine::new(0));
+        let metrics = Arc::new(Metrics::new());
+        let bc = Blockchain::new(consensus.clone(), None, 1337, None)
+            .with_metrics(metrics.clone());
+
+        assert_eq!(metrics.reorgs_total.get(), 0);
+        bc.emit_reorg();
+        assert_eq!(metrics.reorgs_total.get(), 1);
+    }
+
+    #[test]
+    fn test_blockchain_emit_mempool_events() {
+        use crate::core::metrics::Metrics;
+        use crate::chain::blockchain::Blockchain;
+        use crate::consensus::pow::PoWEngine;
+        use std::sync::Arc;
+
+        let consensus = Arc::new(PoWEngine::new(0));
+        let metrics = Arc::new(Metrics::new());
+        let bc = Blockchain::new(consensus.clone(), None, 1337, None)
+            .with_metrics(metrics.clone());
+
+        bc.emit_mempool_eviction();
+        bc.emit_mempool_eviction();
+        assert_eq!(metrics.mempool_evictions.get(), 2);
+
+        bc.emit_mempool_cleanup();
+        assert_eq!(metrics.mempool_expired_cleanups.get(), 1);
+    }
+
+    #[test]
+    fn test_metrics_default_encodes_help_text() {
+        use crate::core::metrics::Metrics;
+
+        let metrics = Metrics::new();
+        metrics.chain_height.set(42);
+        let encoded = metrics.encode();
+
+        assert!(encoded.contains("budlum_chain_height 42"));
+        assert!(encoded.contains("# HELP budlum_chain_height"));
+    }
+
+    // --- ConsensusEngine bls_secret_key defaults ---
+
+    #[test]
+    fn test_pow_engine_bls_key_is_none() {
+        use crate::consensus::pow::PoWEngine;
+        use crate::consensus::ConsensusEngine;
+
+        let engine = PoWEngine::new(2);
+        assert!(engine.bls_secret_key().is_none());
+        assert!(engine.bls_public_key().is_none());
+    }
+
+    #[test]
+    fn test_poa_engine_bls_key_is_none_by_default() {
+        use crate::consensus::poa::{PoAConfig, PoAEngine};
+        use crate::consensus::ConsensusEngine;
+
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+        assert!(engine.bls_secret_key().is_none());
+        assert!(engine.bls_public_key().is_none());
+    }
+
+    #[test]
+    fn test_pos_engine_bls_key_is_some_when_validator_keys_have_bls() {
+        use crate::consensus::pos::{PoSConfig, PoSEngine};
+        use crate::consensus::ConsensusEngine;
+        use crate::crypto::primitives::ValidatorKeys;
+
+        let keys = ValidatorKeys::generate().unwrap();
+        assert!(keys.bls_key.is_some());
+
+        let engine = PoSEngine::new(PoSConfig::default(), Some(keys));
+        assert!(engine.bls_secret_key().is_some());
+        assert!(engine.bls_public_key().is_some());
     }
 }

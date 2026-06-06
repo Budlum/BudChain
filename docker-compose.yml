@@ -1,0 +1,143 @@
+# ── Budlum Core Multi-Node Devnet ──────────────────────────
+# 4-node devnet with PoS consensus, metrics, and RPC
+#
+# Usage:
+#   docker compose up -d
+#   docker compose logs -f node1
+#   curl http://localhost:8545 -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","method":"bud_blockNumber","params":[],"id":1}'
+
+version: "3.9"
+
+services:
+  node1:
+    build: .
+    image: budlum-core:devnet
+    container_name: budlum-node1
+    ports:
+      - "4001:4001"
+      - "8545:8545"
+      - "8546:8546"
+      - "9090:9090"
+    volumes:
+      - node1_data:/home/budlum/data
+      - node1_secrets:/home/budlum/secrets
+    environment:
+      - RUST_LOG=info
+    command:
+      - "--network=devnet"
+      - "--port=4001"
+      - "--consensus=pos"
+      - "--rpc-public-listener=0.0.0.0:8545"
+      - "--rpc-operator-listener=127.0.0.1:8546"
+      - "--metrics-port=9090"
+      - "--db-path=/home/budlum/data/devnet-node1"
+      - "--snapshot-dir=/home/budlum/data/snapshots"
+      - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
+      - "--banned-peer-db=/home/budlum/data/banned-peers.json"
+      - "--bootstrap=/dns4/node1/tcp/4001/p2p/${NODE1_PEER_ID}"
+    networks:
+      - budlum-net
+    restart: unless-stopped
+
+  node2:
+    build: .
+    image: budlum-core:devnet
+    container_name: budlum-node2
+    ports:
+      - "4002:4002"
+      - "18545:8545"
+    volumes:
+      - node2_data:/home/budlum/data
+      - node2_secrets:/home/budlum/secrets
+    environment:
+      - RUST_LOG=info
+    command:
+      - "--network=devnet"
+      - "--port=4002"
+      - "--consensus=pos"
+      - "--db-path=/home/budlum/data/devnet-node2"
+      - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
+      - "--bootstrap=/dns4/node1/tcp/4001"
+    networks:
+      - budlum-net
+    depends_on:
+      - node1
+    restart: unless-stopped
+
+  node3:
+    build: .
+    image: budlum-core:devnet
+    container_name: budlum-node3
+    ports:
+      - "4003:4003"
+    volumes:
+      - node3_data:/home/budlum/data
+      - node3_secrets:/home/budlum/secrets
+    environment:
+      - RUST_LOG=info
+    command:
+      - "--network=devnet"
+      - "--port=4003"
+      - "--consensus=pos"
+      - "--db-path=/home/budlum/data/devnet-node3"
+      - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
+      - "--bootstrap=/dns4/node1/tcp/4001"
+    networks:
+      - budlum-net
+    depends_on:
+      - node1
+    restart: unless-stopped
+
+  node4:
+    build: .
+    image: budlum-core:devnet
+    container_name: budlum-node4
+    ports:
+      - "4004:4004"
+    volumes:
+      - node4_data:/home/budlum/data
+      - node4_secrets:/home/budlum/secrets
+    environment:
+      - RUST_LOG=info
+    command:
+      - "--network=devnet"
+      - "--port=4004"
+      - "--consensus=pos"
+      - "--db-path=/home/budlum/data/devnet-node4"
+      - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
+      - "--bootstrap=/dns4/node1/tcp/4001"
+    networks:
+      - budlum-net
+    depends_on:
+      - node1
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: budlum-prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - budlum-net
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+
+volumes:
+  node1_data:
+  node1_secrets:
+  node2_data:
+  node2_secrets:
+  node3_data:
+  node3_secrets:
+  node4_data:
+  node4_secrets:
+  prometheus_data:
+
+networks:
+  budlum-net:
+    driver: bridge

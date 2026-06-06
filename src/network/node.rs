@@ -114,6 +114,72 @@ async fn test_node_creation() {
 pub const MAX_PEERS: usize = 50;
 pub const DHT_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(300);
 
+pub fn load_or_generate_identity_key(path: Option<&str>) -> identity::Keypair {
+    if let Some(p) = path {
+        let file_path = std::path::Path::new(p);
+        if file_path.exists() {
+            match std::fs::read(file_path) {
+                Ok(bytes) => {
+                    if let Ok(keypair) = identity::Keypair::from_protobuf_encoding(&bytes) {
+                        info!("Loaded persistent P2P identity from {}", p);
+                        return keypair;
+                    }
+                    warn!("Failed to decode identity file {}, generating new key", p);
+                }
+                Err(e) => warn!("Cannot read identity file {}: {}, generating new key", p, e),
+            }
+        }
+        let key = identity::Keypair::generate_ed25519();
+        if let Some(parent) = file_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match key.to_protobuf_encoding() {
+            Ok(encoded) => {
+                if let Err(e) = std::fs::write(file_path, &encoded) {
+                    warn!("Failed to save identity key to {}: {}", p, e);
+                } else {
+                    info!("Saved new P2P identity key to {}", p);
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(file_path, std::fs::Permissions::from_mode(0o600));
+                }
+            }
+            Err(e) => warn!("Failed to encode identity key: {}", e),
+        }
+        key
+    } else {
+        let key = identity::Keypair::generate_ed25519();
+        info!("Generated ephemeral P2P identity (no identity file configured)");
+        key
+    }
+}
+
+pub fn resolve_dns_seeds(seeds: &[String], port: u16) -> Vec<String> {
+    let mut addrs = Vec::new();
+    for seed in seeds {
+        let dns_host = format!("{}:{}", seed, if seed.contains(':') { 0 } else { port });
+        match std::net::ToSocketAddrs::to_socket_addrs(&dns_host.as_str()) {
+            Ok(socket_addrs) => {
+                for sa in socket_addrs {
+                    let multiaddr: String = match sa {
+                        std::net::SocketAddr::V4(addr) => {
+                            format!("/ip4/{}/tcp/{}", addr.ip(), addr.port())
+                        }
+                        std::net::SocketAddr::V6(addr) => {
+                            format!("/ip6/{}/tcp/{}", addr.ip(), addr.port())
+                        }
+                    };
+                    addrs.push(multiaddr);
+                }
+            }
+            Err(e) => warn!("DNS seed resolution failed for {}: {}", seed, e),
+        }
+    }
+    addrs
+}
+
 pub struct Node {
     swarm: Swarm<BudlumBehaviour>,
     command_rx: mpsc::Receiver<NodeCommand>,
@@ -122,17 +188,33 @@ pub struct Node {
     pub chain: ChainHandle,
     pub peer_manager: Arc<Mutex<PeerManager>>,
     pub bootstrap_peers: Vec<String>,
+    pub dns_seeds: Vec<String>,
     pub peer_count: Arc<AtomicUsize>,
     pub sync_state: Arc<AtomicUsize>,
-    pub in_progress_snapshots: HashMap<u64, Vec<Option<Vec<u8>>>>,
+    #[allow(clippy::type_complexity)]
+    pub in_progress_snapshots: HashMap<u64, (u64, Vec<Option<Vec<u8>>>)>,
     pub max_peers: usize,
+    pub validator_address: Option<crate::core::address::Address>,
+    pub last_precommit_height: u64,
+    pub identity_path: Option<std::path::PathBuf>,
+    pub banned_peer_db: Option<std::path::PathBuf>,
+    pub mdns_enabled: bool,
+    pub metrics: Option<Arc<crate::core::metrics::Metrics>>,
 }
 
 impl Node {
     pub fn new(chain: ChainHandle) -> Result<Self, Box<dyn Error>> {
         let local_key = identity::Keypair::generate_ed25519();
+        Self::with_key(chain, local_key, true)
+    }
+
+    pub fn with_key(
+        chain: ChainHandle,
+        local_key: identity::Keypair,
+        mdns_enabled: bool,
+    ) -> Result<Self, Box<dyn Error>> {
         let peer_id = PeerId::from(local_key.public());
-        info!("Node ID: {}", peer_id);
+        info!("Node ID: {} (mDNS: {})", peer_id, mdns_enabled);
         let message_id_fn = |message: &gossipsub::Message| {
             let mut s = DefaultHasher::new();
             message.data.hash(&mut s);
@@ -203,10 +285,17 @@ impl Node {
             chain,
             peer_manager,
             bootstrap_peers: Vec::new(),
+            dns_seeds: Vec::new(),
             peer_count,
             sync_state,
             in_progress_snapshots: HashMap::new(),
             max_peers: MAX_PEERS,
+            validator_address: None,
+            last_precommit_height: 0,
+            identity_path: None,
+            banned_peer_db: None,
+            mdns_enabled,
+            metrics: None,
         })
     }
     pub fn new_with_bootstrap(
@@ -220,6 +309,37 @@ impl Node {
     pub fn apply_network_security(&mut self, network: crate::core::chain_config::Network) {
         let security = network.security_config();
         self.max_peers = security.max_peers;
+        self.mdns_enabled = security.mdns_enabled;
+        if security.persist_banned_peers && self.banned_peer_db.is_none() {
+            self.banned_peer_db = Some(
+                std::path::PathBuf::from(format!("./data/{:?}/banned-peers.json", network).to_lowercase())
+            );
+        }
+    }
+
+    pub fn with_identity(mut self, path: Option<String>) -> Self {
+        self.identity_path = path.map(std::path::PathBuf::from);
+        self
+    }
+
+    pub fn with_banned_peer_db(mut self, path: Option<String>) -> Self {
+        self.banned_peer_db = path.map(std::path::PathBuf::from);
+        self
+    }
+
+    pub fn with_dns_seeds(mut self, seeds: Vec<String>) -> Self {
+        self.dns_seeds = seeds;
+        self
+    }
+
+    pub fn with_bootstrap_peers(mut self, peers: Vec<String>) -> Self {
+        self.bootstrap_peers = peers;
+        self
+    }
+
+    pub fn with_metrics(mut self, metrics: Arc<crate::core::metrics::Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
     pub fn get_client(&self) -> NodeClient {
         NodeClient {
@@ -258,19 +378,87 @@ impl Node {
         self.swarm.behaviour_mut().kad.bootstrap()?;
         Ok(())
     }
+    fn load_banned_peers_from_db(&self) {
+        let Some(ref db_path) = self.banned_peer_db else {
+            return;
+        };
+        match std::fs::read_to_string(db_path) {
+            Ok(data) => {
+                #[derive(serde::Deserialize)]
+                struct BanList {
+                    banned_peers: Vec<String>,
+                }
+                if let Ok(list) = serde_json::from_str::<BanList>(&data) {
+                    if !list.banned_peers.is_empty() {
+                        if let Ok(mut pm) = self.peer_manager.lock() {
+                            pm.reload_banned_peers(&list.banned_peers);
+                            info!(
+                                "Reloaded {} banned peers from {}",
+                                list.banned_peers.len(),
+                                db_path.display()
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    warn!("Failed to read banned peer DB: {}", e);
+                }
+            }
+        }
+    }
+
+    fn save_banned_peers_to_db(&self) {
+        let Some(ref db_path) = self.banned_peer_db else {
+            return;
+        };
+        let banned_peers = match self.peer_manager.lock() {
+            Ok(pm) => pm.get_persisted_banned_peers(),
+            Err(_) => return,
+        };
+        if banned_peers.is_empty() {
+            return;
+        }
+        let json = serde_json::json!({ "banned_peers": banned_peers });
+        if let Some(parent) = db_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+            if let Err(e) = std::fs::write(db_path, serde_json::to_string_pretty(&json).unwrap_or_default()) {
+                warn!("Failed to persist banned peers: {}", e);
+            }
+        }
+    }
+
     pub async fn run(&mut self) {
         info!("Node running...");
+
+        // Load durable banned peers
+        self.load_banned_peers_from_db();
+
+        // Bootstrap from configured peers
         for addr in self.bootstrap_peers.clone() {
             if let Err(e) = self.bootstrap(&addr) {
                 warn!("Bootstrap dial failed for {}: {}", addr, e);
             }
         }
+
+        // Resolve and dial DNS seeds
+        if !self.dns_seeds.is_empty() {
+            let dns_addrs = resolve_dns_seeds(&self.dns_seeds, 0);
+            for addr in &dns_addrs {
+                if let Err(e) = self.dial(addr) {
+                    warn!("DNS seed dial failed for {}: {}", addr, e);
+                }
+            }
+        }
+
         let mut gc_interval = tokio::time::interval(Duration::from_secs(60));
         let mut discovery_interval = tokio::time::interval(Duration::from_secs(300));
         let mut finality_interval = tokio::time::interval(Duration::from_secs(30));
         let mut slashing_gossip_interval = tokio::time::interval(Duration::from_secs(5));
         let mut dht_interval = tokio::time::interval(DHT_BOOTSTRAP_INTERVAL);
         let mut banning_interval = tokio::time::interval(Duration::from_secs(60));
+        let mut ban_persist_interval = tokio::time::interval(Duration::from_secs(300));
         let mut last_voted_height: u64 = 0;
 
         loop {
@@ -293,24 +481,84 @@ impl Node {
                     }
                 }
                 _ = finality_interval.tick() => {
+                    // Resolve validator address lazily
+                    if self.validator_address.is_none() {
+                        self.validator_address = self.chain.get_validator_address().await;
+                    }
+
+                    let Some(voter_addr) = self.validator_address else {
+                        continue;
+                    };
+
                     let height = self.chain.get_height().await;
                     let checkpoint_interval = crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
                     let checkpoint_height = (height / checkpoint_interval) * checkpoint_interval;
 
+                    // --- Check aggregator state for auto-precommit ---
+                    let agg_state = self.chain.get_aggregator_state().await;
+                    if agg_state.active
+                        && agg_state.prevote_quorum_reached
+                        && !agg_state.precommit_quorum_reached
+                        && checkpoint_height > self.last_precommit_height
+                    {
+                        match self.chain.sign_precommit(
+                            agg_state.epoch,
+                            agg_state.checkpoint_height,
+                            agg_state.checkpoint_hash.clone(),
+                            voter_addr,
+                        ).await {
+                            Ok(precommit) => {
+                                info!(
+                                    "Finality: auto-precommit for checkpoint height {} (epoch {})",
+                                    agg_state.checkpoint_height, agg_state.epoch
+                                );
+                                let vote_msg = NetworkMessage::Precommit {
+                                    epoch: precommit.epoch,
+                                    checkpoint_height: precommit.checkpoint_height,
+                                    checkpoint_hash: precommit.checkpoint_hash,
+                                    voter_id: voter_addr.to_hex(),
+                                    sig_bls: precommit.sig_bls,
+                                };
+                                let topic = gossipsub::IdentTopic::new("blocks");
+                                let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes());
+                                self.last_precommit_height = agg_state.checkpoint_height;
+                            }
+                            Err(e) => {
+                                warn!("Failed to sign precommit: {}", e);
+                            }
+                        }
+                    }
+
+                    // --- Periodic prevote ---
                     if checkpoint_height > 0 && checkpoint_height > last_voted_height {
                         if let Some(block) = self.chain.get_block(checkpoint_height).await {
                             let epoch = checkpoint_height / checkpoint_interval;
-                            let vote_msg = NetworkMessage::Prevote {
+                            match self.chain.sign_prevote(
                                 epoch,
                                 checkpoint_height,
-                                checkpoint_hash: block.hash.clone(),
-                                voter_id: self.peer_id.to_string(),
-                                sig_bls: Vec::new(),
-                            };
-                            info!("Finality: voting for checkpoint height {} (epoch {})", checkpoint_height, epoch);
-                            let topic = gossipsub::IdentTopic::new("blocks");
-                            let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes());
-                            last_voted_height = checkpoint_height;
+                                block.hash.clone(),
+                                voter_addr,
+                            ).await {
+                                Ok(prevote) => {
+                                    info!(
+                                        "Finality: voting for checkpoint height {} (epoch {})",
+                                        checkpoint_height, epoch
+                                    );
+                                    let vote_msg = NetworkMessage::Prevote {
+                                        epoch: prevote.epoch,
+                                        checkpoint_height: prevote.checkpoint_height,
+                                        checkpoint_hash: prevote.checkpoint_hash,
+                                        voter_id: voter_addr.to_hex(),
+                                        sig_bls: prevote.sig_bls,
+                                    };
+                                    let topic = gossipsub::IdentTopic::new("blocks");
+                                    let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes());
+                                    last_voted_height = checkpoint_height;
+                                }
+                                Err(e) => {
+                                    warn!("Failed to sign prevote: {}", e);
+                                }
+                            }
                         }
                     }
                 }
@@ -341,6 +589,9 @@ impl Node {
                         warn!("Proactively disconnecting banned peer: {}", peer_id);
                         let _ = self.swarm.disconnect_peer_id(peer_id);
                     }
+                }
+                _ = ban_persist_interval.tick() => {
+                    self.save_banned_peers_to_db();
                 }
                 cmd = self.command_rx.recv() => {
                     if let Some(cmd) = cmd {
@@ -392,6 +643,9 @@ impl Node {
                                 self.peer_count.fetch_sub(1, Ordering::SeqCst);
                                 continue;
                             }
+                            if let Some(ref m) = self.metrics {
+                                m.p2p_peers_connected.set(count as i64);
+                            }
                             info!("Connected to {}, Peers: {}", peer_id, count);
 
                             let handshake = NetworkMessage::Handshake {
@@ -430,11 +684,17 @@ impl Node {
                         }
                         SwarmEvent::ConnectionClosed { peer_id, .. } => {
                             self.peer_count.fetch_sub(1, Ordering::SeqCst);
+                            if let Some(ref m) = self.metrics {
+                                m.p2p_peers_connected.set(self.peer_count.load(Ordering::SeqCst) as i64);
+                            }
                             warn!("Disconnected from {}, Peers: {}", peer_id, self.peer_count.load(Ordering::SeqCst));
                         }
                         SwarmEvent::Behaviour(BudlumBehaviourEvent::Ping(_event)) => {
                         }
                         SwarmEvent::Behaviour(BudlumBehaviourEvent::Mdns(event)) => {
+                            if !self.mdns_enabled {
+                                continue;
+                            }
                             match event {
                                 mdns::Event::Discovered(peers) => {
                                     for (peer_id, addr) in peers {
@@ -469,6 +729,10 @@ impl Node {
                             if !self.peer_manager.lock().map(|mut pm| pm.check_rate_limit(&peer_id)).unwrap_or(false) {
                                 warn!("Rate limit exceeded or lock error for peer {}", peer_id);
                                 continue;
+                            }
+
+                            if let Some(ref m) = self.metrics {
+                                m.p2p_messages_received.inc();
                             }
 
                             info!("Received from {}: id={}", peer_id, id);
@@ -710,17 +974,19 @@ impl Node {
                                         if let Some(snapshot) = snapshot_opt {
                                             let chunks = snapshot.chunk(512 * 1024); // 512KB chunks
                                             let total = chunks.len() as u32;
+                                            let session_id = rand::random::<u64>();
                                             for (i, chunk_data) in chunks.into_iter().enumerate() {
                                                 let chunk_msg = NetworkMessage::SnapshotChunk {
                                                     height,
                                                     index: i as u32,
                                                     total,
                                                     data: chunk_data,
+                                                    session_id,
                                                 };
                                                 let topic = gossipsub::IdentTopic::new("blocks");
                                                 let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, chunk_msg.to_bytes());
                                             }
-                                            info!("Sent {} snapshot chunks for height {}", total, height);
+                                            info!("Sent {} snapshot chunks for height {} (session={})", total, height, session_id);
                                         } else {
                                             let response = NetworkMessage::StateSnapshotResponse { height, state_root: "".into(), ok: false };
                                             let topic = gossipsub::IdentTopic::new("blocks");
@@ -728,15 +994,28 @@ impl Node {
                                         }
                                     }
 
-                                    NetworkMessage::SnapshotChunk { height, index, total, data } => {
-                                        info!("Received snapshot chunk {}/{} for height {}", index + 1, total, height);
-                                        let entry = self.in_progress_snapshots.entry(height).or_insert_with(|| vec![None; total as usize]);
+                                    NetworkMessage::SnapshotChunk { height, index, total, data, session_id } => {
+                                        info!("Received snapshot chunk {}/{} for height {} (session={})", index + 1, total, height, session_id);
+
+                                        // Validate session: if we have an active session for this height,
+                                        // reject chunks from a different session
+                                        if let Some((existing_session, _)) = self.in_progress_snapshots.get(&height) {
+                                            if *existing_session != session_id {
+                                                warn!("Rejecting snapshot chunk from stale session {} (current {}) for height {}", session_id, existing_session, height);
+                                                continue;
+                                            }
+                                        }
+
+                                        let entry = &mut self.in_progress_snapshots
+                                            .entry(height)
+                                            .or_insert_with(|| (session_id, vec![None; total as usize]))
+                                            .1;
                                         if (index as usize) < entry.len() {
                                             entry[index as usize] = Some(data);
                                         }
 
                                         if entry.iter().all(|c| c.is_some()) {
-                                            info!("Snapshot reassembly complete for height {}", height);
+                                            info!("Snapshot reassembly complete for height {} (session={})", height, session_id);
                                             let mut full_data = Vec::new();
                                             for chunk in entry.drain(..) {
                                                 full_data.extend(chunk.unwrap());

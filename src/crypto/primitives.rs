@@ -1,3 +1,4 @@
+use bls12_381::{G2Affine, G2Projective, Scalar};
 use ed25519_dalek::{
     Signature, Signer, SigningKey, Verifier, VerifyingKey, SECRET_KEY_LENGTH, SIGNATURE_LENGTH,
 };
@@ -78,10 +79,67 @@ pub struct KeyPair {
 use schnorrkel::Keypair as SchnorrkelKeypair;
 
 #[derive(Clone)]
+pub struct BlsKeypair {
+    pub secret_key: Scalar,
+    pub public_key: Vec<u8>,
+}
+
+impl BlsKeypair {
+    pub fn generate() -> Result<Self, CryptoError> {
+        use rand::RngCore;
+        let mut seed = [0u8; 64];
+        rand::rng().fill_bytes(&mut seed);
+        let sk = Scalar::from_bytes_wide(&seed);
+        let pk = G2Affine::from(G2Projective::generator() * sk);
+        let pk_compressed = pk.to_compressed().to_vec();
+        Ok(BlsKeypair {
+            secret_key: sk,
+            public_key: pk_compressed,
+        })
+    }
+
+    pub fn from_seed(seed: &[u8; 64]) -> Self {
+        let sk = Scalar::from_bytes_wide(seed);
+        let pk = G2Affine::from(G2Projective::generator() * sk);
+        let pk_compressed = pk.to_compressed().to_vec();
+        BlsKeypair {
+            secret_key: sk,
+            public_key: pk_compressed,
+        }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = self.secret_key.to_bytes().to_vec();
+        bytes.extend_from_slice(&self.public_key);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
+        if bytes.len() < 32 + 96 {
+            return Err(CryptoError::InvalidKey(
+                "Invalid BLS keypair bytes length".into(),
+            ));
+        }
+        let mut sk_bytes = [0u8; 32];
+        sk_bytes.copy_from_slice(&bytes[0..32]);
+        let sk_opt = Scalar::from_bytes(&sk_bytes);
+        if sk_opt.is_none().into() {
+            return Err(CryptoError::InvalidKey("Invalid BLS secret key".into()));
+        }
+        let pk = bytes[32..128].to_vec();
+        Ok(BlsKeypair {
+            secret_key: sk_opt.unwrap(),
+            public_key: pk,
+        })
+    }
+}
+
+#[derive(Clone)]
 pub struct ValidatorKeys {
     pub sig_key: KeyPair,
     pub vrf_key: SchnorrkelKeypair,
     pub pq_key: Option<PqKeyPair>,
+    pub bls_key: Option<BlsKeypair>,
 }
 
 #[derive(Clone)]
@@ -148,10 +206,12 @@ impl ValidatorKeys {
         let mut csprng = rand_core::OsRng;
         let vrf_key = SchnorrkelKeypair::generate_with(&mut csprng);
         let pq_key = Some(PqKeyPair::generate());
+        let bls_key = Some(BlsKeypair::generate()?);
         Ok(ValidatorKeys {
             sig_key,
             vrf_key,
             pq_key,
+            bls_key,
         })
     }
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), CryptoError> {
@@ -160,6 +220,9 @@ impl ValidatorKeys {
         if let Some(pq_key) = &self.pq_key {
             bytes.extend_from_slice(pq_key.public_key_bytes());
             bytes.extend_from_slice(&pq_key.secret_key);
+        }
+        if let Some(bls_key) = &self.bls_key {
+            bytes.extend_from_slice(&bls_key.to_bytes());
         }
         std::fs::write(path.as_ref(), bytes).map_err(|e| CryptoError::Io(e.to_string()))?;
         #[cfg(unix)]
@@ -179,30 +242,34 @@ impl ValidatorKeys {
         let vrf_key = SchnorrkelKeypair::from_bytes(&bytes[32..128])
             .map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
 
-        let pq_key = if bytes.len() == 128 {
-            None
+        let mut cursor = 128;
+        let pq_key = if bytes.len() > cursor
+            && bytes.len() >= cursor + dilithium5::public_key_bytes() + dilithium5::secret_key_bytes()
+        {
+            let pq_pk_end = cursor + dilithium5::public_key_bytes();
+            let pq_sk_end = pq_pk_end + dilithium5::secret_key_bytes();
+            let pk = PqKeyPair::from_bytes(
+                &bytes[cursor..pq_pk_end],
+                &bytes[pq_pk_end..pq_sk_end],
+            )?;
+            cursor = pq_sk_end;
+            Some(pk)
         } else {
-            let expected_len =
-                128 + dilithium5::public_key_bytes() + dilithium5::secret_key_bytes();
-            if bytes.len() != expected_len {
-                return Err(CryptoError::InvalidKey(format!(
-                    "Invalid validator key file length: expected {} or {}, got {}",
-                    128,
-                    expected_len,
-                    bytes.len()
-                )));
-            }
-            let pq_pk_end = 128 + dilithium5::public_key_bytes();
-            Some(PqKeyPair::from_bytes(
-                &bytes[128..pq_pk_end],
-                &bytes[pq_pk_end..expected_len],
-            )?)
+            None
+        };
+
+        let bls_key = if bytes.len() >= cursor + 128 {
+            let bls = BlsKeypair::from_bytes(&bytes[cursor..cursor + 128])?;
+            Some(bls)
+        } else {
+            None
         };
 
         Ok(ValidatorKeys {
             sig_key,
             vrf_key,
             pq_key,
+            bls_key,
         })
     }
 }

@@ -60,6 +60,12 @@ pub trait ConsensusEngine: Send + Sync {
     fn signer(&self) -> Option<&dyn crate::crypto::signer::ConsensusSigner> {
         None
     }
+    fn bls_secret_key(&self) -> Option<bls12_381::Scalar> {
+        None
+    }
+    fn bls_public_key(&self) -> Option<Vec<u8>> {
+        None
+    }
     fn validate_timestamp(
         &self,
         block: &Block,

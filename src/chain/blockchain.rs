@@ -57,8 +57,49 @@ pub struct Blockchain {
     pub settlement_finality_hashes: Vec<crate::domain::Hash32>,
     pub pending_slashing_evidence: Vec<SlashingEvidence>,
     pub finality_aggregator: Option<FinalityAggregator>,
+    pub metrics: Option<Arc<crate::core::metrics::Metrics>>,
 }
 impl Blockchain {
+    pub fn with_metrics(mut self, metrics: Arc<crate::core::metrics::Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    pub(crate) fn emit_chain_metrics(&self) {
+        if let Some(ref m) = self.metrics {
+            let height = self.chain.len() as i64;
+            m.chain_height.set(height);
+            m.finalized_height.set(self.finalized_height as i64);
+            m.blocks_produced.inc();
+            m.finality_lag.set((height as u64).saturating_sub(self.finalized_height) as i64);
+            m.mempool_size.set(self.mempool.len() as i64);
+        }
+    }
+
+    pub fn emit_tx_processed(&self, count: u64) {
+        if let Some(ref m) = self.metrics {
+            m.transactions_processed.inc_by(count);
+        }
+    }
+
+    pub fn emit_reorg(&self) {
+        if let Some(ref m) = self.metrics {
+            m.reorgs_total.inc();
+        }
+    }
+
+    pub fn emit_mempool_eviction(&self) {
+        if let Some(ref m) = self.metrics {
+            m.mempool_evictions.inc();
+        }
+    }
+
+    pub fn emit_mempool_cleanup(&self) {
+        if let Some(ref m) = self.metrics {
+            m.mempool_expired_cleanups.inc();
+        }
+    }
+
     pub fn new(
         consensus: Arc<dyn ConsensusEngine>,
         storage: Option<Storage>,
@@ -167,28 +208,53 @@ impl Blockchain {
         let mut restored_finalized_hash = chain_vec[0].hash.clone();
 
         if let Some(ref pm) = pruning_manager {
-            if let Ok(Some(snapshot)) = pm.load_latest_snapshot() {
-                if snapshot.chain_id == chain_id {
-                    for (addr, balance) in &snapshot.balances {
-                        let acc = state.get_or_create(addr);
-                        acc.balance = *balance;
-                    }
-                    for (addr, nonce) in &snapshot.nonces {
-                        let acc = state.get_or_create(addr);
-                        acc.nonce = *nonce;
-                    }
-                    snapshot_height = snapshot.height;
-                    restored_finalized_height = snapshot.finalized_height;
-                    restored_finalized_hash = snapshot.finalized_hash.clone();
+            // Try V2 snapshot first, fall back to V1
+            let v2_loaded = if let Ok(Some(v2_snapshot)) = pm.load_latest_snapshot_v2() {
+                if v2_snapshot.chain_id == chain_id {
+                    state = crate::core::account::AccountState::from_snapshot_v2(&v2_snapshot);
+                    snapshot_height = v2_snapshot.height;
+                    restored_finalized_height = v2_snapshot.finalized_height;
+                    restored_finalized_hash = v2_snapshot.finalized_hash.clone();
                     info!(
-                        "Restored state from snapshot at height {} (finalized={})",
-                        snapshot_height, restored_finalized_height
+                        "Restored state from V2 snapshot at height {} (finalized={}, epoch={}, base_fee={})",
+                        snapshot_height, restored_finalized_height, v2_snapshot.epoch_index, v2_snapshot.base_fee
                     );
+                    true
                 } else {
                     warn!(
-                        "Snapshot chain_id mismatch (expected {}, got {}). Ignoring.",
-                        chain_id, snapshot.chain_id
+                        "V2 snapshot chain_id mismatch (expected {}, got {}). Trying V1 fallback.",
+                        chain_id, v2_snapshot.chain_id
                     );
+                    false
+                }
+            } else {
+                false
+            };
+
+            if !v2_loaded {
+                if let Ok(Some(snapshot)) = pm.load_latest_snapshot() {
+                    if snapshot.chain_id == chain_id {
+                        for (addr, balance) in &snapshot.balances {
+                            let acc = state.get_or_create(addr);
+                            acc.balance = *balance;
+                        }
+                        for (addr, nonce) in &snapshot.nonces {
+                            let acc = state.get_or_create(addr);
+                            acc.nonce = *nonce;
+                        }
+                        snapshot_height = snapshot.height;
+                        restored_finalized_height = snapshot.finalized_height;
+                        restored_finalized_hash = snapshot.finalized_hash.clone();
+                        info!(
+                            "Restored state from V1 snapshot at height {} (finalized={})",
+                            snapshot_height, restored_finalized_height
+                        );
+                    } else {
+                        warn!(
+                            "V1 snapshot chain_id mismatch (expected {}, got {}). Ignoring.",
+                            chain_id, snapshot.chain_id
+                        );
+                    }
                 }
             }
         }
@@ -334,6 +400,7 @@ impl Blockchain {
             settlement_finality_hashes: Vec::new(),
             pending_slashing_evidence: Vec::new(),
             finality_aggregator: None,
+            metrics: None,
         };
 
         if let Some(first) = bc.chain.first() {
@@ -1731,6 +1798,7 @@ impl Blockchain {
         }
 
         self.mempool.set_min_fee(self.state.base_fee);
+        self.emit_chain_metrics();
         Some(block)
     }
     pub fn mine_pending_transactions(&mut self, miner_address: Address) {
@@ -1888,18 +1956,32 @@ impl Blockchain {
         {
             let height = last_block.index;
             if pruning_manager.should_create_snapshot(height) {
-                let snapshot = crate::chain::snapshot::StateSnapshot::from_state(
+                let genesis_hash = self.chain.first().map(|b| b.hash.clone()).unwrap_or_default();
+                let certs: Vec<FinalityCert> = self
+                    .pending_finality_certs
+                    .values()
+                    .flat_map(|v| v.iter().cloned())
+                    .collect();
+                let params = crate::chain::snapshot::StateSnapshotV2Params {
                     height,
-                    last_block.hash.clone(),
-                    self.chain_id,
+                    block_hash: last_block.hash.clone(),
+                    genesis_hash,
+                    chain_id: self.chain_id,
+                    finalized_height: self.finalized_height,
+                    finalized_hash: self.finalized_hash.clone(),
+                    finality_certificates: certs,
+                };
+                let v2_snapshot = crate::chain::snapshot::StateSnapshotV2::from_state(
                     &self.state,
-                    self.finalized_height,
-                    self.finalized_hash.clone(),
+                    params,
                 );
-                if let Err(e) = pruning_manager.save_snapshot(&snapshot) {
-                    warn!("Failed to save snapshot at height {}: {}", height, e);
+                if let Err(e) = pruning_manager.save_snapshot_v2(&v2_snapshot) {
+                    warn!("Failed to save V2 snapshot at height {}: {}", height, e);
                 } else {
-                    info!("Saved state snapshot at height {}", height);
+                    info!(
+                        "Saved V2 state snapshot at height {} (epoch={}, base_fee={})",
+                        height, self.state.epoch_index, self.state.base_fee
+                    );
 
                     let prunable = pruning_manager.get_prunable_blocks(
                         self.chain.len() as u64,
@@ -1918,6 +2000,7 @@ impl Blockchain {
             }
         }
 
+        self.emit_chain_metrics();
         Ok(())
     }
 
@@ -2105,20 +2188,63 @@ impl Blockchain {
             .get(finalized_height as usize)
             .map(|block| block.hash.clone())
             .unwrap_or_else(|| self.finalized_hash.clone());
-        Some(crate::chain::snapshot::StateSnapshot::from_state(
+
+        // Produce V2 snapshot with full consensus metadata
+        let genesis_hash = self.chain.first().map(|b| b.hash.clone()).unwrap_or_default();
+        let certs: Vec<FinalityCert> = self
+            .pending_finality_certs
+            .values()
+            .flat_map(|v| v.iter())
+            .filter(|c| c.checkpoint_height <= height)
+            .cloned()
+            .collect();
+
+        let params = crate::chain::snapshot::StateSnapshotV2Params {
+            height,
+            block_hash: block.hash.clone(),
+            genesis_hash,
+            chain_id: self.chain_id,
+            finalized_height,
+            finalized_hash: finalized_hash.clone(),
+            finality_certificates: certs,
+        };
+        let v2 = crate::chain::snapshot::StateSnapshotV2::from_state(&state, params);
+
+        // Encode V2 to JSON bytes; receivers try V2 first, V1 as fallback
+        let v2_bytes = v2.to_bytes();
+
+        // Wrap as V1-compatible bytes (serde ignores unknown fields on V1 parse)
+        let mut snapshot = crate::chain::snapshot::StateSnapshot::from_state(
             height,
             block.hash.clone(),
             self.chain_id,
             &state,
             finalized_height,
             finalized_hash,
-        ))
+        );
+        // Embed V2 data for capable receivers
+        snapshot.snapshot_hash = format!("__v2__{}", hex::encode(&v2_bytes));
+        Some(snapshot)
     }
 
     pub fn apply_state_snapshot(
         &mut self,
         snapshot: crate::chain::snapshot::StateSnapshot,
     ) -> Result<(), String> {
+        use crate::chain::snapshot::StateSnapshotV2;
+
+        // Try V2 restore if available (embedded in snapshot_hash prefix)
+        if let Some(v2_data) = snapshot.snapshot_hash.strip_prefix("__v2__") {
+            if let Ok(v2_bytes) = hex::decode(v2_data) {
+                if let Ok(v2) = StateSnapshotV2::from_bytes(&v2_bytes) {
+                    if v2.verify() && v2.chain_id == self.chain_id {
+                        return self.apply_v2_snapshot(&v2);
+                    }
+                }
+            }
+        }
+
+        // Fall back to V1 restore
         if !snapshot.verify() {
             return Err("Snapshot verification failed".into());
         }
@@ -2181,6 +2307,53 @@ impl Blockchain {
         self.finalized_hash = snapshot.finalized_hash;
         self.mempool.set_min_fee(self.state.base_fee);
 
+        Ok(())
+    }
+
+    fn apply_v2_snapshot(
+        &mut self,
+        v2: &crate::chain::snapshot::StateSnapshotV2,
+    ) -> Result<(), String> {
+        if v2.height < self.finalized_height {
+            return Err(format!(
+                "V2 snapshot height {} older than finalized {}",
+                v2.height, self.finalized_height
+            ));
+        }
+
+        let Some(block) = self.chain.get(v2.height as usize) else {
+            return Err("V2 snapshot height not in local chain".into());
+        };
+        if block.hash != v2.block_hash {
+            return Err("V2 snapshot block hash mismatch".into());
+        }
+
+        let mut v2_state = AccountState::from_snapshot_v2(v2);
+        let state_root = v2_state.calculate_state_root();
+        if !block.state_root.is_empty() && state_root != block.state_root {
+            return Err(format!(
+                "V2 snapshot state root mismatch: expected {}, got {}",
+                block.state_root, state_root
+            ));
+        }
+
+        self.state = v2_state;
+        self.finalized_height = v2.finalized_height;
+        self.finalized_hash = v2.finalized_hash.clone();
+        self.mempool.set_min_fee(self.state.base_fee);
+
+        // Restore finality certs from V2 snapshot
+        for cert in &v2.finality_certificates {
+            self.pending_finality_certs
+                .entry(cert.checkpoint_height)
+                .or_default()
+                .push(cert.clone());
+        }
+
+        info!(
+            "Applied V2 snapshot at height {} (epoch={}, base_fee={}, certs={})",
+            v2.height, v2.epoch_index, v2.base_fee, v2.finality_certificates.len()
+        );
         Ok(())
     }
 
@@ -2308,6 +2481,69 @@ impl Blockchain {
         }
     }
 
+    pub fn sign_prevote(
+        &self,
+        epoch: u64,
+        checkpoint_height: u64,
+        checkpoint_hash: &str,
+        voter_id: &Address,
+    ) -> Result<Prevote, String> {
+        let sk = self
+            .consensus
+            .bls_secret_key()
+            .ok_or("No BLS secret key available")?;
+
+        let msg = {
+            let dummy = Prevote {
+                epoch,
+                checkpoint_height,
+                checkpoint_hash: checkpoint_hash.to_string(),
+                voter_id: *voter_id,
+                sig_bls: vec![],
+            };
+            dummy.signing_message()
+        };
+
+        let sig = crate::chain::finality::sign_bls(&sk, &msg);
+
+        Ok(Prevote {
+            epoch,
+            checkpoint_height,
+            checkpoint_hash: checkpoint_hash.to_string(),
+            voter_id: *voter_id,
+            sig_bls: sig,
+        })
+    }
+
+    pub fn sign_precommit(
+        &self,
+        epoch: u64,
+        checkpoint_height: u64,
+        checkpoint_hash: &str,
+        voter_id: &Address,
+    ) -> Result<Precommit, String> {
+        let sk = self
+            .consensus
+            .bls_secret_key()
+            .ok_or("No BLS secret key available")?;
+
+        let msg = crate::chain::finality::checkpoint_signing_message(
+            epoch,
+            checkpoint_height,
+            checkpoint_hash,
+        );
+
+        let sig = crate::chain::finality::sign_bls(&sk, &msg);
+
+        Ok(Precommit {
+            epoch,
+            checkpoint_height,
+            checkpoint_hash: checkpoint_hash.to_string(),
+            voter_id: *voter_id,
+            sig_bls: sig,
+        })
+    }
+
     pub fn start_prevote_phase(&mut self, checkpoint_height: u64, checkpoint_hash: String) {
         let epoch = checkpoint_height / crate::core::chain_config::EPOCH_LEN;
         let mut aggregator = FinalityAggregator::new(epoch, checkpoint_height, checkpoint_hash);
@@ -2318,6 +2554,13 @@ impl Blockchain {
             "Started prevote phase for checkpoint height={} (epoch={})",
             checkpoint_height, epoch
         );
+    }
+
+    pub fn get_aggregator_state(&self) -> crate::chain::finality::AggregatorState {
+        self.finality_aggregator
+            .as_ref()
+            .map(|agg| agg.get_state())
+            .unwrap_or_else(crate::chain::finality::AggregatorState::inactive)
     }
 
     pub fn consensus(&self) -> &dyn ConsensusEngine {
@@ -2350,6 +2593,7 @@ impl Clone for Blockchain {
             settlement_finality_hashes: self.settlement_finality_hashes.clone(),
             pending_slashing_evidence: self.pending_slashing_evidence.clone(),
             finality_aggregator: None,
+            metrics: self.metrics.clone(),
         }
     }
 }

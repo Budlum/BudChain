@@ -3,14 +3,14 @@
 > **A controlled public-devnet candidate for Layer-1 blockchain research: modular, deterministic, and multi-consensus native.**
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/rade/budlum-core)
-[![Test Coverage](https://img.shields.io/badge/tests-292-blue)](https://github.com/rade/budlum-core)
+[![Test Coverage](https://img.shields.io/badge/tests-332-blue)](https://github.com/rade/budlum-core)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust Version](https://img.shields.io/badge/rust-1.94.0-orange.svg)](https://www.rust-lang.org/)
 
 ---
 
 > [!CAUTION]
-> **Controlled Public Devnet Candidate (v0.2-dev)**
+> **Controlled Public Devnet Candidate (v0.3-dev)**
 >
 > Budlum Core is suitable for controlled public devnet experiments with clear risk disclaimers. It is **NOT** audited mainnet software, has not completed professional security review, and should **NOT** be used for financial transactions or production applications carrying real value.
 
@@ -32,7 +32,10 @@ Most blockchain frameworks are optimized for a single consensus worldview. Budlu
 - 🌉 **Verified Trustless Interop**: Experimental bridge flow where lock, mint, burn, and unlock are tied to committed domain events and Merkle proofs.
 - 🧠 **Deterministic Execution**: Research into replay-safe state transitions and consistent global headers.
 - 🧩 **Modular Core**: Decoupled consensus, networking, and execution layers for rapid prototyping.
-- 🌐 **P2P Native**: Built on `libp2p` with GossipSub and headers-first synchronization.
+- 🌐 **P2P Native**: Built on `libp2p` with GossipSub, persistent identity, DNS seed resolution, and durable peer banning.
+- 🛡️ **BLS Finality**: Two-phase BLS-signed prevote/precommit protocol with aggregated signature verification and auto-precommit.
+- 🩺 **Dual RPC**: Separate public and operator JSON-RPC 2.0 listeners with health endpoints, per-IP rate limiting, and trusted-proxy enforcement.
+- 📦 **Deployment Ready**: Docker multi-stage image, docker-compose 4-node devnet, systemd unit, and Prometheus metrics collectors.
 - 🛠️ **Developer First**: Book-style technical documentation, JSON-RPC reference material, and a growing adversarial test suite.
 
 ---
@@ -41,7 +44,7 @@ Most blockchain frameworks are optimized for a single consensus worldview. Budlu
 
 ```mermaid
 graph TD
-    User(("User")) --> CLI["CLI / RPC"]
+    User(("User")) --> CLI["CLI / RPC (Public + Operator)"]
     CLI --> Node["Node Service"]
 
     subgraph "Settlement Layer"
@@ -55,7 +58,7 @@ graph TD
     subgraph "Consensus Domains"
         ChainActor -.-> Engine["ConsensusEngine Trait"]
         Engine --> PoW["Proof of Work"]
-        Engine --> PoS["Proof of Stake + VRF"]
+        Engine --> PoS["Proof of Stake + VRF + BLS"]
         Engine --> PoA["Proof of Authority"]
         Engine --> BFT["BFT Finality Adapters"]
     end
@@ -68,101 +71,107 @@ graph TD
     subgraph "Networking"
         Node --> Libp2p["libp2p Swarm"]
         Libp2p --> Gossip["GossipSub"]
-        Libp2p --> Reputation["Peer Scoring"]
+        Libp2p --> Identity["Persistent Identity"]
+        Libp2p --> Reputation["Peer Scoring + Durable Bans"]
+    end
+
+    subgraph "Observability"
+        Node --> Metrics["Prometheus /metrics"]
+        Metrics --> Grafana["Grafana (optional)"]
     end
 ```
 
 ---
 
-## 🧩 Devnet Candidate Features (v0.2)
+## 🧩 Devnet Candidate Features (v0.3)
 
 ### 🌍 Multi-Consensus Settlement (Model B)
-An implementation of a **Byzantine-Hardened Settlement Layer** designed for network chaos:
-- **Verified-Only Commitments**: Production and public RPC paths reject raw domain commitments; settlement updates must arrive as `VerifiedDomainCommitment` with a matching finality proof hash.
-- **Adapter Hardening**: PoW requires confirmation depth plus non-zero work hint; PoS binds finality certificate, validator snapshot, commitment, and registered validator-set hash.
-- **Parent-Linked Domain History**: Production settlement rejects domain commitments whose `parent_domain_block_hash` does not link to the last committed domain block.
-- **Strict Nonce Invariant**: Immediately applicable commitments with stale or equal nonce updates are rejected before durable insertion.
+- **Verified-Only Commitments**: RPC paths reject raw domain commitments; settlement updates must arrive as `VerifiedDomainCommitment` with a matching finality proof hash.
+- **Adapter Hardening**: PoW requires confirmation depth; PoS binds finality certificate, validator snapshot, and registered validator-set hash.
+- **Parent-Linked Domain History**: Rejects commitments whose `parent_domain_block_hash` does not link to the last committed domain block.
+- **Strict Nonce Invariant**: Stale or equal nonce updates are rejected before durable insertion.
 - **Byzantine Resilience**: Global state convergence verified via an 18-test "Chaos Matrix" under simulated partitions and delays.
-- **Equivocation Immunity**: Protocol-level detection and global freezing of domains that produce conflicting block hashes at the same height; exact duplicate commitments remain idempotent.
-- **Atomic Settlement Persistence**: Commitment insertions and domain height/hash updates are persisted in one storage batch.
-- **Domain Operator Bonds**: Domain registration requires a non-zero operator identity and a minimum bond, creating an economic hook for frozen domains.
-- **Idempotent Processing**: Identical commitments produce the same state root regardless of arrival order.
-- **Secured Hash Framing**: Prepends every field with its length prefix (64-bit LE) during multi-field hashing (`hash_fields_bytes`) to mathematically rule out framing/concatenation collisions.
-- **Rollback-Protected Snapshot Sync**: State sync verifies P2P snapshots against the node's `chain_id` and strictly rejects snapshot heights older than `finalized_height` to eliminate state rollback attacks.
-- **Durable Database Index Repair**: Fully modernized `--repair-db` module that reconstructs all index mappings (`HEIGHT:`, `TX_IDX:`, `CANONICAL_HEIGHT`, `LAST`) directly from raw block data.
-- **PKCS#11 HSM Signing**: `ConsensusSigner` trait with pluggable backends: `Pkcs11Signer` (Hardware Security Module via `cryptoki`) and `KeyPairSigner` (local file fallback). Mainnet validator startup now proceeds with HSM configuration.
-- **Finality Aggregator Wiring**: Prevote and Precommit gossip messages are forwarded through `ChainActor` to the `Blockchain`'s `FinalityAggregator`. Checkpoint blocks automatically trigger the prevote phase. Quorum-driven certificate production verified in integration tests.
+- **Equivocation Immunity**: Protocol-level detection and global freezing of conflicting domains; duplicate commitments remain idempotent.
+- **Atomic Settlement Persistence**: Commitment insertions and domain height/hash updates persisted in one storage batch.
 
 ### 🌉 Verified Cross-Domain Bridge
-- **Bridge-Enabled Domains Only**: Asset registration and lock operations require active, registered, bridge-enabled domains.
-- **Safe Lock Constraints**: Source and target domains must differ, transfer amount must be non-zero, and expiry must be after the source event height.
-- **Raw Burn/Unlock Disabled**: Direct bridge burn and unlock calls are rejected as settlement authority.
-- **Proof-Based Return Path**: Funds return only after a target-domain `BridgeBurned` event is committed and verified through its event Merkle proof.
+- **Bridge-Enabled Domains Only**: Asset registration requires active, registered, bridge-enabled domains.
+- **Safe Lock Constraints**: Source/target domains must differ, transfer amount must be non-zero.
+- **Raw Burn/Unlock Disabled**: Direct bridge burn and unlock calls rejected.
+- **Proof-Based Return Path**: Funds return only after target-domain `BridgeBurned` event is committed and verified.
 
-### 🛡️ Post-Quantum Readiness (Experimental)
-- Research into Dilithium-based checkpoint attestations.
-- `FinalityCert` logic requiring verified `QC_BLOB` metadata.
-- PQ-fault-proof infrastructure for invalid attestation detection.
+### 🛡️ BLS Finality Protocol (v0.3)
+- **`BlsKeypair`**: BLS12-381 keypair integrated into `ValidatorKeys` with `sign_bls()` / `verify_bls_sig()` primitives.
+- **Signed Votes**: Validators produce BLS-signed prevote/precommit messages via `ConsensusEngine::bls_secret_key()`.
+- **Auto-Precommit**: Periodic loop detects prevote quorum and automatically signs + broadcasts precommit.
+- **Aggregate Verification**: `FinalityCert` verified with BLS pairing: `e(sig, G2_gen) == e(H(msg), agg_pk)`.
+- **Adversarial Tests**: Byzantine equivocation rejection, tampered aggregate signature detection, full 4-validator flow.
 
-### ⚙️ BudZKVM Execution (In-Progress)
-- Research into STARK-proven contract execution inside the L1 path.
-- Gas-limited deterministic VM execution (Prototype).
-- Atomic rejection of invalid bytecode or failed proofs.
+### ⚡ RPC Hardening (v0.3)
+- **Dual Listeners**: Separate public and operator HTTP servers.
+- **Trusted Proxy**: Only configured proxy IPs may set `X-Forwarded-For` for client identification.
+- **Per-IP Rate Limiting**: Independent token buckets per client IP, 60-second sliding window.
+- **Health Endpoints**: `bud_health` (status/height/peers) and `bud_nodeInfo` (chainId/peerId/rpcMode).
+- **Body/Connection Limits**: Public 10MB/500 conn, Operator 50MB/10 conn.
 
-### 🌐 Networking & Resilience
-- **libp2p Integration**: Robust P2P transport with peer reputation.
-- **Automatic Sync Start**: Handshake height gaps trigger headers-first sync, and `bud_syncing` reports real sync state.
-- **Finality Gossip**: Prevote/Precommit messages are received, verified, and forwarded to the `FinalityAggregator` for quorum-driven certificate production. Finality certs are gossiped network-wide.
-- **Slashing Evidence Gossip**: PoS double-sign evidence is gossiped as a network message and included by later producers.
-- **Operational Resilience**: Anti-spam mempool, fee-based ordering, and database integrity audits.
-- **Deterministic Restarts**: State recovery from persistent Sled-backed storage.
+### 🌐 P2P Hardening (v0.3)
+- **Persistent Identity**: `load_or_generate_identity_key()` — P2P keypair survives restarts.
+- **Durable Peer Bans**: JSON-persisted bans reloaded on startup, saved every 5 minutes.
+- **mDNS Policy**: Per-network (`mainnet`/`testnet` off, `devnet` on).
+- **DNS Seed Resolution**: `resolve_dns_seeds()` resolves hostnames to multiaddrs at startup.
 
-### 💰 Devnet Validator Economics
-- Block rewards are distributed through the execution layer.
-- Verified slashing evidence deducts validator stake and marks validators as slashed.
-- Structured `BudlumError` exists and critical execution paths use checked APIs, while some compatibility wrappers still expose legacy string errors.
-- Logging in consensus, network, block, and blockchain paths uses `tracing` instead of raw stdout prints.
+### 💾 Snapshot V2 (v0.3)
+- **Canonical V2 Format**: `StateSnapshotV2` with full consensus metadata (epoch, base_fee, block_reward, unbonding_queue, cross-domain roots, finality certs).
+- **Replay Equivalence**: `AccountState::from_snapshot_v2()` preserves all consensus state; state root matches original.
+- **Chunk-Session Binding**: `session_id` in `SnapshotChunk` prevents cross-peer chunk mixing.
+- **V2-First Restore**: Startup tries V2 snapshot, falls back to V1.
+
+### 📊 Observability (v0.3)
+- **Prometheus**: Live collectors for chain height, finalized height, blocks produced, transactions, reorgs, mempool size/evictions/cleanups, P2P messages/peers.
+- **Docker**: Multi-stage Debian image, 4-node `docker-compose` with Prometheus.
+- **systemd**: Production unit file with sandboxing and restart policy.
+- **Fuzzing**: 4 `cargo-fuzz` targets (block, transaction, snapshot, consensus header).
 
 ---
 
 ## 🧪 Verification & Test Coverage
 
-Budlum Core is built with a "Test-First" engineering mindset. The architecture is validated against extreme edge cases and adversarial scenarios.
-
-- **Total Tests**: `292` (All passing ✅)
-- **Byzantine Chaos Matrix**: 18 specific scenarios covering network partitions, packet duplication, out-of-order delivery, and domain equivocation.
-- **Distributed Devnet Simulation**: Verified gossip convergence across a 5-node `libp2p` mesh with isolated storage.
-- **Persistence Recovery**: State and pending buffers are recovered after simulated node crashes during pending commitment cycles.
-- **Shared-State Safety**: Deterministic double-spend protection across heterogeneous consensus domains.
-- **Verified Bridge Lifecycle**: Lock, mint, burn, and unlock are tested through committed events and Merkle proofs.
+- **Total Tests**: `332` (All passing ✅)
+- **Byzantine Chaos Matrix**: 18 scenarios covering network partitions, duplication, out-of-order delivery, and domain equivocation.
+- **BLS Finality Tests**: 12 tests for sign/verify, aggregator flow, byzantine equivocation, certificate tampering, replay equivalence.
+- **RPC Security Tests**: Auth, CORS, IP filtering, per-IP rate limiting, trusted proxy, operator defaults.
+- **P2P Hardening Tests**: Persistent identity, durable ban roundtrip, DNS seed resolution.
+- **Snapshot V2 Tests**: V2 metadata preservation, replay equivalence, serialization roundtrip, PruningManager V2 save/load.
+- **Metrics Tests**: Chain metrics emit, counter increments, encoding format.
+- **Distributed Devnet Simulation**: Gossip convergence across a 5-node `libp2p` mesh.
 
 To run the full suite:
 ```bash
 nix develop --command cargo test --workspace
 ```
 
+To run fuzz targets:
+```bash
+cd fuzz && cargo fuzz run block_deserialize
+```
+
 ---
 
 ## 🔒 Production Hardening Status
 
-The repository now includes fail-closed Mainnet guardrails, Strict Config V2, safer genesis tooling, a versioned composite state commitment, durable canonical commit recovery, staged Snapshot V2 helpers, baseline RPC middleware, PKCS#11 HSM signing adapter, finality aggregator wiring, and pinned CI release gates.
+**v0.3-dev** closes 5 of 7 Mainnet blockers. Remaining work: external security audit, archive-node policy, migration framework, and production runbooks.
 
-This is still **not Mainnet-ready**. BLS-signed vote production from validators, separate public/operator RPC listeners, trusted-proxy enforcement, persistent P2P identity, complete Snapshot V2 restore, operational packaging, and external audit work remain open.
-
-Read the book's [**Production Hardening Status**](docs/en/book/ch12_production_hardening.md) chapter for the detailed implementation matrix and explicit blockers.
+Read the book's [**Production Hardening Status**](docs/en/book/ch12_production_hardening.md) for the full implementation matrix.
 
 ---
 
-## ⚡ Quick Start (Local / Controlled Public Devnet)
+## ⚡ Quick Start
 
 ### Requirements
-- Rust `1.94.0`
-- `protoc` (Protocol Buffers)
-- A sibling checkout of `BudZKVM`, used by local path dependencies
+- Rust `1.94.0`, `protoc`, sibling checkout of [BudZKVM](https://github.com/Budlum/BudZKVM)
 
 ### Build
 ```bash
-mkdir budlum-workspace && cd budlum-workspace
 git clone https://github.com/Budlum/BudZKVM.git
 git clone https://github.com/rade/budlum-core.git infra
 cd infra
@@ -170,8 +179,6 @@ cargo build --release
 ```
 
 ### Run a Devnet Node
-Use the following flags to test different consensus adapters:
-
 ```bash
 # Proof of Work
 ./target/release/budlum-core --consensus pow --difficulty 3 --port 4001
@@ -180,34 +187,28 @@ Use the following flags to test different consensus adapters:
 ./target/release/budlum-core --consensus pos --min-stake 5000 --db-path ./data/pos_node
 ```
 
-Generate an explicit local devnet genesis file without printing private key material:
-
+### Docker 4-node Devnet
 ```bash
-mkdir -p ./secrets
-./target/release/budlum-core genesis build \
-  --chain-id 1337 \
-  --dev-key-output ./secrets/devnet-allocation.key \
-  --output ./config/devnet-genesis.local.json
+docker compose up -d
+curl -X POST -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","method":"bud_blockNumber","params":[],"id":1}' \
+  http://localhost:8545
 ```
 
-### 🛠️ Developer Experience (JSON-RPC)
-
-Interact with the node using standard JSON-RPC 2.0. Every core action is exposed via the `bud_` namespace.
-
-Settlement-changing RPC calls are intentionally proof-gated:
-- `bud_submitDomainCommitment` is disabled; use `bud_submitVerifiedDomainCommitment`.
-- `bud_burnBridgeTransfer` and `bud_unlockBridgeTransfer` are disabled raw paths.
-- Use `bud_burnBridgeTransferWithEvent` and `bud_unlockBridgeTransferVerified` for the verified bridge return flow.
-
+### RPC Usage
 ```bash
-# Get current block height
-curl -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"bud_blockNumber","params":[],"id":1}' http://localhost:8545
+# Health check
+curl -X POST -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","method":"bud_health","params":[],"id":1}' \
+  http://localhost:8545
 
-# Get balance of a researcher address
-curl -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"bud_getBalance","params":["0x..."],"id":1}' http://localhost:8545
+# Block height
+curl -X POST -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","method":"bud_blockNumber","params":[],"id":1}' \
+  http://localhost:8545
 ```
 
-See the full [**Protocol Specification**](SPECIFICATION.md) for a detailed API reference.
+See the [**Protocol Specification**](SPECIFICATION.md) for the full API reference.
 
 ---
 
@@ -215,25 +216,25 @@ See the full [**Protocol Specification**](SPECIFICATION.md) for a detailed API r
 
 - [x] **Devnet Economic Hardening**: Validator reward distribution and slashing execution.
 - [x] **Settlement Atomicity**: Atomic commitment + domain height/hash persistence.
-- [x] **Verified Settlement Hardening**: Proof-gated domain commitments, parent-link checks, strict nonce rejection, and validator-set anchoring.
-- [x] **Verified Bridge Return Path**: Bridge unlock requires a committed target-domain burn event proof.
-- [x] **Sync Hardening**: Handshake-triggered headers-first sync and real sync status reporting.
-- [x] **PKCS#11 HSM Signer**: `ConsensusSigner` trait, `Pkcs11Signer` (`cryptoki`), `KeyPairSigner` local fallback, wired into PoS/PoA block production. Mainnet validator startup gate removed.
-- [x] **Finality Aggregator Wiring**: Prevote/Precommit gossip → ChainActor → Blockchain aggregator → auto-start at checkpoint heights. Certificate production and verification wired.
+- [x] **Verified Settlement Hardening**: Proof-gated commitments, parent-link checks, strict nonce.
+- [x] **Verified Bridge Return Path**: Bridge unlock requires committed target-domain burn event proof.
+- [x] **Sync Hardening**: Handshake-triggered headers-first sync.
+- [x] **PKCS#11 HSM Signer**: `ConsensusSigner` trait, `Pkcs11Signer`, `KeyPairSigner`.
+- [x] **BLS Finality Protocol**: `BlsKeypair`, signed prevote/precommit, auto-precommit, 12 tests.
+- [x] **RPC Dual Listener**: Public/operator servers, trusted proxies, health endpoints, per-IP rate limiting.
+- [x] **P2P Hardening**: Persistent identity, durable bans, mDNS policy, DNS seeds.
+- [x] **Snapshot V2**: Canonical V2 restore, replay equivalence, chunk-session binding.
+- [x] **Observability**: Prometheus live collectors, Metrics wiring.
+- [x] **Deployment**: Docker image, docker-compose, systemd unit, fuzz targets.
 - [ ] **ZKVM Optimizations**: Improving STARK proof generation performance.
 - [ ] **Formal Verification**: Researching TLA+ models for settlement convergence.
-- [x] **Baseline RPC Middleware**: API-key auth, CORS allowlists, allowed-IP filtering, and a global request-rate window.
-- [x] **Pinned CI Gates**: Rustfmt, `cargo check`, Clippy with warnings denied, workspace tests, and locked release builds.
-- [ ] **Mainnet Operations**: Separate RPC listeners, trusted proxies, health checks, Docker/systemd packaging, and production runbooks.
-- [ ] **Security Testing**: Fuzzing, expanded property tests, fault injection, restore drills, and external audit preparation.
-- [ ] **Privacy Layer**: Exploring Monero-style and Zcash-style privacy primitives.
-- [ ] **AI Execution Layer**: Investigating AI-assisted protocol automation and risk scoring.
+- [ ] **External Audit**: Professional security review.
+- [ ] **Privacy Layer**: Exploring Monero/Zcash-style privacy primitives.
+- [ ] **AI Execution Layer**: Investigating AI-assisted protocol automation.
 
 Budlum is built for protocol researchers and developers who like looking under the hood. We welcome technical reviews, protocol design discussions, and security feedback.
 
 ## 🤝 Join the Research
-
-Budlum is built for protocol researchers and developers who like looking under the hood. We welcome technical reviews, protocol design discussions, and security feedback.
 
 ### How to Contribute:
 1. ⭐ **Star the Repository**: It helps other researchers find our work.

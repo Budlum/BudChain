@@ -80,6 +80,7 @@ pub enum NetworkMessage {
         index: u32,
         total: u32,
         data: Vec<u8>,
+        session_id: u64,
     },
 
     Prevote {

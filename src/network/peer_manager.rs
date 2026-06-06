@@ -263,6 +263,26 @@ impl PeerManager {
         scored.sort_by(|a, b| b.1.score.cmp(&a.1.score));
         scored.into_iter().take(n).map(|(id, _)| *id).collect()
     }
+
+    pub fn get_persisted_banned_peers(&self) -> Vec<String> {
+        let now = Instant::now();
+        self.peers
+            .iter()
+            .filter(|(_, s)| s.banned_until.is_some_and(|until| now < until))
+            .map(|(id, _)| id.to_base58())
+            .collect()
+    }
+
+    pub fn reload_banned_peers(&mut self, peer_ids: &[String]) {
+        let until = Instant::now() + BAN_DURATION;
+        for pid_str in peer_ids {
+            if let Ok(pid) = pid_str.parse::<PeerId>() {
+                let entry = self.peers.entry(pid).or_default();
+                entry.banned_until = Some(until);
+                entry.score = BAN_THRESHOLD;
+            }
+        }
+    }
 }
 #[cfg(test)]
 mod tests {

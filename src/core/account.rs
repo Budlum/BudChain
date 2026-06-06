@@ -193,6 +193,40 @@ impl AccountState {
         }
     }
 
+    pub fn from_snapshot_v2(snapshot: &crate::chain::snapshot::StateSnapshotV2) -> Self {
+        let mut accounts = BTreeMap::new();
+        for (addr, balance) in &snapshot.balances {
+            let mut acc = Account::new(*addr);
+            acc.balance = *balance;
+            acc.nonce = *snapshot.nonces.get(addr).unwrap_or(&0);
+            accounts.insert(*addr, acc);
+        }
+        let mut validators = BTreeMap::new();
+        for (addr, v) in &snapshot.validators {
+            validators.insert(*addr, v.clone());
+        }
+        AccountState {
+            accounts,
+            validators,
+            unbonding_queue: snapshot.unbonding_queue.clone(),
+            storage: None,
+            epoch_index: snapshot.epoch_index,
+            last_epoch_time: snapshot.last_epoch_time,
+            governance: GovernanceState::default(),
+            base_fee: snapshot.base_fee,
+            block_reward: snapshot.block_reward,
+            dirty_accounts: HashSet::new(),
+            keys_dirty: true,
+            cached_leaves: Vec::new(),
+            cached_keys: Vec::new(),
+            cached_tree: Vec::new(),
+            bridge_root: snapshot.bridge_root,
+            message_root: snapshot.message_root,
+            settlement_root: snapshot.settlement_root,
+            global_header_summary: snapshot.global_header_summary,
+        }
+    }
+
     pub fn init_genesis(&mut self, genesis_pubkey: &Address) {
         let account = Account::with_balance(*genesis_pubkey, GENESIS_BALANCE);
         self.accounts.insert(*genesis_pubkey, account);

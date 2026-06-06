@@ -145,6 +145,44 @@ pub fn hash_to_g1(msg: &[u8]) -> G1Affine {
     G1Affine::from(G1Projective::generator() * s)
 }
 
+pub fn sign_bls(sk: &Scalar, msg: &[u8]) -> Vec<u8> {
+    let h_msg = hash_to_g1(msg);
+    let sig = G1Affine::from(G1Projective::from(h_msg) * sk);
+    sig.to_compressed().to_vec()
+}
+
+pub fn verify_bls_sig(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), String> {
+    let pk_bytes: [u8; 96] = pk
+        .try_into()
+        .map_err(|_| "Invalid BLS public key length".to_string())?;
+    let pk_affine = G2Affine::from_compressed(&pk_bytes);
+    if pk_affine.is_none().into() {
+        return Err("Invalid BLS public key encoding".to_string());
+    }
+
+    let sig_bytes: [u8; 48] = sig
+        .try_into()
+        .map_err(|_| "Invalid BLS signature length".to_string())?;
+    let sig_affine = G1Affine::from_compressed(&sig_bytes);
+    if sig_affine.is_none().into() {
+        return Err("Invalid BLS signature encoding".to_string());
+    }
+
+    let h_msg = hash_to_g1(msg);
+    let g2_gen_neg = -G2Affine::generator();
+
+    let pairing_result = bls12_381::multi_miller_loop(&[
+        (&sig_affine.unwrap(), &g2_gen_neg.into()),
+        (&h_msg, &pk_affine.unwrap().into()),
+    ])
+    .final_exponentiation();
+
+    if pairing_result != bls12_381::Gt::identity() {
+        return Err("BLS signature verification failed".into());
+    }
+    Ok(())
+}
+
 pub fn verify_pop(entry: &ValidatorEntry) -> bool {
     if entry.bls_public_key.is_empty() || entry.pop_signature.is_empty() {
         return false;
@@ -182,6 +220,33 @@ pub fn verify_pop(entry: &ValidatorEntry) -> bool {
     .final_exponentiation();
 
     pairing_result == bls12_381::Gt::identity()
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AggregatorState {
+    pub active: bool,
+    pub epoch: u64,
+    pub checkpoint_height: u64,
+    pub checkpoint_hash: String,
+    pub prevote_quorum_reached: bool,
+    pub precommit_quorum_reached: bool,
+    pub prevote_count: usize,
+    pub precommit_count: usize,
+}
+
+impl AggregatorState {
+    pub fn inactive() -> Self {
+        AggregatorState {
+            active: false,
+            epoch: 0,
+            checkpoint_height: 0,
+            checkpoint_hash: String::new(),
+            prevote_quorum_reached: false,
+            precommit_quorum_reached: false,
+            prevote_count: 0,
+            precommit_count: 0,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -333,6 +398,19 @@ impl FinalityAggregator {
             bitmap,
             set_hash: snapshot.set_hash.clone(),
         })
+    }
+
+    pub fn get_state(&self) -> AggregatorState {
+        AggregatorState {
+            active: true,
+            epoch: self.epoch,
+            checkpoint_height: self.checkpoint_height,
+            checkpoint_hash: self.checkpoint_hash.clone(),
+            prevote_quorum_reached: self.prevote_quorum_reached,
+            precommit_quorum_reached: self.precommit_quorum_reached,
+            prevote_count: self.prevotes.len(),
+            precommit_count: self.precommits.len(),
+        }
     }
 }
 

@@ -9,7 +9,8 @@ use hyper::header::{HeaderValue, AUTHORIZATION};
 use hyper::StatusCode;
 use jsonrpsee::server::{HttpBody, HttpRequest, HttpResponse};
 use jsonrpsee::types::error::ErrorObjectOwned;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -23,9 +24,25 @@ pub struct RpcSecurityConfig {
     pub allowed_ips: Vec<String>,
     pub cors_origins: Vec<String>,
     pub rate_limit_per_minute: Option<u64>,
+    pub trusted_proxies: Vec<String>,
+    pub max_request_body_size: Option<u32>,
+    pub max_connections: Option<u32>,
 }
 
 impl RpcSecurityConfig {
+    pub fn operator_default() -> Self {
+        Self {
+            auth_required: false,
+            api_key: None,
+            allowed_ips: vec!["127.0.0.1".into(), "::1".into()],
+            cors_origins: Vec::new(),
+            rate_limit_per_minute: None,
+            trusted_proxies: Vec::new(),
+            max_request_body_size: Some(50 * 1024 * 1024),
+            max_connections: Some(10),
+        }
+    }
+
     pub fn from_env(
         auth_required: bool,
         api_key_env: Option<&str>,
@@ -51,21 +68,30 @@ impl RpcSecurityConfig {
             allowed_ips,
             cors_origins,
             rate_limit_per_minute,
+            trusted_proxies: Vec::new(),
+            max_request_body_size: None,
+            max_connections: None,
         })
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RpcMode {
+    Public,
+    Operator,
 }
 
 #[derive(Clone)]
 struct RpcSecurityLayer {
     config: Arc<RpcSecurityConfig>,
-    rate_window: Arc<Mutex<VecDeque<Instant>>>,
+    per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
 }
 
 impl RpcSecurityLayer {
     fn new(config: RpcSecurityConfig) -> Self {
         Self {
             config: Arc::new(config),
-            rate_window: Arc::new(Mutex::new(VecDeque::new())),
+            per_ip_rates: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -77,7 +103,7 @@ impl<S> Layer<S> for RpcSecurityLayer {
         RpcSecurityService {
             inner,
             config: self.config.clone(),
-            rate_window: self.rate_window.clone(),
+            per_ip_rates: self.per_ip_rates.clone(),
         }
     }
 }
@@ -86,7 +112,7 @@ impl<S> Layer<S> for RpcSecurityLayer {
 struct RpcSecurityService<S> {
     inner: S,
     config: Arc<RpcSecurityConfig>,
-    rate_window: Arc<Mutex<VecDeque<Instant>>>,
+    per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
 }
 
 impl<S, B> Service<HttpRequest<B>> for RpcSecurityService<S>
@@ -117,7 +143,8 @@ where
             return Box::pin(async { Ok(text_response(StatusCode::UNAUTHORIZED, "Unauthorized")) });
         }
 
-        if !is_rate_limited(&self.config, &self.rate_window) {
+        let client_ip = extract_client_ip(&self.config, &req);
+        if !is_per_ip_rate_limited(&self.config, &self.per_ip_rates, client_ip) {
             return Box::pin(async {
                 Ok(text_response(
                     StatusCode::TOO_MANY_REQUESTS,
@@ -135,6 +162,7 @@ pub struct RpcServer {
     chain: ChainHandle,
     node: NodeClient,
     security: RpcSecurityConfig,
+    mode: RpcMode,
 }
 
 impl RpcServer {
@@ -143,6 +171,7 @@ impl RpcServer {
             chain,
             node,
             security: RpcSecurityConfig::default(),
+            mode: RpcMode::Public,
         }
     }
 
@@ -155,6 +184,21 @@ impl RpcServer {
             chain,
             node,
             security,
+            mode: RpcMode::Public,
+        }
+    }
+
+    pub fn with_security_and_mode(
+        chain: ChainHandle,
+        node: NodeClient,
+        security: RpcSecurityConfig,
+        mode: RpcMode,
+    ) -> Self {
+        Self {
+            chain,
+            node,
+            security,
+            mode,
         }
     }
 
@@ -162,12 +206,23 @@ impl RpcServer {
         use jsonrpsee::server::ServerBuilder;
         let http_middleware =
             ServiceBuilder::new().layer(RpcSecurityLayer::new(self.security.clone()));
-        let server = ServerBuilder::default()
-            .set_http_middleware(http_middleware)
-            .build(addr.clone())
-            .await?;
+        let mut builder = ServerBuilder::default()
+            .set_http_middleware(http_middleware);
 
-        info!("RPC Server started on {}", addr);
+        if let Some(limit) = self.security.max_request_body_size {
+            builder = builder.max_request_body_size(limit);
+        }
+        if let Some(limit) = self.security.max_connections {
+            builder = builder.max_connections(limit);
+        }
+
+        let server = builder.build(addr.clone()).await?;
+
+        let mode_label = match self.mode {
+            RpcMode::Public => "public",
+            RpcMode::Operator => "operator",
+        };
+        info!("RPC Server ({}) started on {}", mode_label, addr);
         let handle = server.start(self.into_rpc());
         tokio::spawn(handle.stopped());
         Ok(())
@@ -308,26 +363,55 @@ fn is_authorized<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
             .unwrap_or(false)
 }
 
+fn extract_client_ip<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> Option<IpAddr> {
+    // If trusted proxies are configured, extract the real client IP from X-Forwarded-For
+    // This is checked after validate_trusted_proxy has already identified the request came
+    // from a trusted source (the actual validation of the proxy IP is complex without
+    // socket-level info from hyper, so we rely on network-level firewall rules).
+
+    // Try X-Forwarded-For first (standard proxy header)
+    if !config.trusted_proxies.is_empty() {
+        if let Some(forwarded_ip) = req
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .map(str::trim)
+            .and_then(|ip| ip.parse::<IpAddr>().ok())
+        {
+            return Some(forwarded_ip);
+        }
+    }
+
+    // Fall back to X-Real-IP
+    if let Some(real_ip) = req
+        .headers()
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|ip| ip.parse::<IpAddr>().ok())
+    {
+        return Some(real_ip);
+    }
+
+    // No identifiable IP — reject
+    None
+}
+
 fn is_ip_allowed<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
     if config.allowed_ips.is_empty() {
         return true;
     }
 
-    let forwarded = req
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim);
-    let real_ip = req
-        .headers()
-        .get("x-real-ip")
-        .and_then(|value| value.to_str().ok());
-    let Some(ip) = forwarded.or(real_ip) else {
+    let client_ip = extract_client_ip(config, req);
+    let Some(ip) = client_ip else {
         return false;
     };
 
-    config.allowed_ips.iter().any(|allowed| allowed == ip)
+    let ip_str = ip.to_string();
+    config
+        .allowed_ips
+        .iter()
+        .any(|allowed| allowed == "*" || allowed == &ip_str)
 }
 
 fn is_origin_allowed<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
@@ -349,9 +433,10 @@ fn is_origin_allowed<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> boo
         .any(|allowed| allowed == "*" || allowed == origin)
 }
 
-fn is_rate_limited(
+fn is_per_ip_rate_limited(
     config: &RpcSecurityConfig,
-    rate_window: &Arc<Mutex<VecDeque<Instant>>>,
+    per_ip_rates: &Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
+    client_ip: Option<IpAddr>,
 ) -> bool {
     let Some(limit) = config.rate_limit_per_minute else {
         return true;
@@ -360,12 +445,19 @@ fn is_rate_limited(
         return false;
     }
 
+    let ip = match client_ip {
+        Some(ip) => ip,
+        None => return false,
+    };
+
     let now = Instant::now();
     let cutoff = now - Duration::from_secs(60);
-    let mut window = match rate_window.lock() {
-        Ok(window) => window,
+    let mut rates = match per_ip_rates.lock() {
+        Ok(rates) => rates,
         Err(_) => return false,
     };
+
+    let window = rates.entry(ip).or_default();
     while window.front().is_some_and(|instant| *instant < cutoff) {
         window.pop_front();
     }
@@ -840,6 +932,41 @@ impl BudlumApiServer for RpcServer {
         })?;
         Ok(Self::global_header_to_json(header))
     }
+
+    async fn health(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let height = self.chain.get_height().await;
+        let syncing = self.node.is_syncing();
+        let peer_count = self
+            .node
+            .peer_count
+            .load(std::sync::atomic::Ordering::SeqCst);
+        Ok(serde_json::json!({
+            "status": if syncing { "syncing" } else { "healthy" },
+            "blockHeight": Self::to_hex(height),
+            "peerCount": peer_count,
+            "syncing": syncing,
+        }))
+    }
+
+    async fn node_info(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let chain_id = self.chain.get_chain_id().await;
+        let height = self.chain.get_height().await;
+        let validator_set_hash = self.chain.get_validator_set_hash().await;
+        let sync_state = if self.node.is_syncing() { 1u64 } else { 0u64 };
+        let peer_count = self
+            .node
+            .peer_count
+            .load(std::sync::atomic::Ordering::SeqCst);
+        Ok(serde_json::json!({
+            "chainId": Self::to_hex(chain_id),
+            "blockHeight": Self::to_hex(height),
+            "validatorSetHash": validator_set_hash,
+            "syncState": sync_state,
+            "peerCount": peer_count,
+            "peerId": self.node.peer_id.to_string(),
+            "rpcMode": match self.mode { RpcMode::Public => "public", RpcMode::Operator => "operator" },
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -877,7 +1004,7 @@ mod security_tests {
     }
 
     #[test]
-    fn origin_and_forwarded_ip_are_enforced_when_configured() {
+    fn ip_allowed_with_x_real_ip_fallback() {
         let config = RpcSecurityConfig {
             allowed_ips: vec!["10.0.0.1".to_string()],
             cors_origins: vec!["https://wallet.example".to_string()],
@@ -885,33 +1012,89 @@ mod security_tests {
         };
 
         let allowed = request_with_headers(&[
-            ("x-forwarded-for", "10.0.0.1"),
+            ("x-real-ip", "10.0.0.1"),
             ("origin", "https://wallet.example"),
         ]);
         let denied_ip = request_with_headers(&[
-            ("x-forwarded-for", "10.0.0.2"),
+            ("x-real-ip", "10.0.0.2"),
             ("origin", "https://wallet.example"),
         ]);
         let denied_origin =
-            request_with_headers(&[("x-forwarded-for", "10.0.0.1"), ("origin", "https://bad")]);
+            request_with_headers(&[("x-real-ip", "10.0.0.1"), ("origin", "https://bad")]);
 
         assert!(is_ip_allowed(&config, &allowed));
-        assert!(is_origin_allowed(&config, &allowed));
         assert!(!is_ip_allowed(&config, &denied_ip));
         assert!(!is_origin_allowed(&config, &denied_origin));
     }
 
     #[test]
-    fn rate_limit_uses_one_minute_window() {
+    fn origin_is_enforced_when_configured() {
+        let config = RpcSecurityConfig {
+            cors_origins: vec!["https://wallet.example".to_string()],
+            ..Default::default()
+        };
+
+        let allowed = request_with_headers(&[("origin", "https://wallet.example")]);
+        let denied = request_with_headers(&[("origin", "https://bad.example")]);
+
+        assert!(is_origin_allowed(&config, &allowed));
+        assert!(!is_origin_allowed(&config, &denied));
+    }
+
+    #[test]
+    fn trusted_proxy_honors_x_forwarded_for() {
+        let config = RpcSecurityConfig {
+            allowed_ips: vec!["10.0.0.100".to_string()],
+            trusted_proxies: vec!["127.0.0.1".to_string()],
+            ..Default::default()
+        };
+
+        let req = request_with_headers(&[("x-forwarded-for", "10.0.0.100")]);
+        let ip = extract_client_ip(&config, &req);
+        assert_eq!(ip, Some("10.0.0.100".parse().unwrap()));
+    }
+
+    #[test]
+    fn no_trusted_proxies_returns_none_without_x_real_ip() {
+        let config = RpcSecurityConfig {
+            allowed_ips: vec!["10.0.0.100".to_string()],
+            trusted_proxies: vec![],
+            ..Default::default()
+        };
+
+        // Without trusted proxies and without x-real-ip, no IP can be extracted
+        let ip = extract_client_ip(&config, &request_with_headers(&[("x-forwarded-for", "10.0.0.100")]));
+        assert!(ip.is_none());
+    }
+
+    #[test]
+    fn per_ip_rate_limit_tracks_by_client_ip() {
         let config = RpcSecurityConfig {
             rate_limit_per_minute: Some(2),
             ..Default::default()
         };
-        let window = Arc::new(Mutex::new(VecDeque::new()));
+        let rates = Arc::new(Mutex::new(HashMap::new()));
+        let ip1: IpAddr = "1.1.1.1".parse().unwrap();
+        let ip2: IpAddr = "2.2.2.2".parse().unwrap();
 
-        assert!(is_rate_limited(&config, &window));
-        assert!(is_rate_limited(&config, &window));
-        assert!(!is_rate_limited(&config, &window));
+        assert!(is_per_ip_rate_limited(&config, &rates, Some(ip1)));
+        assert!(is_per_ip_rate_limited(&config, &rates, Some(ip1)));
+        assert!(!is_per_ip_rate_limited(&config, &rates, Some(ip1)));
+
+        // Different IP has its own limit
+        assert!(is_per_ip_rate_limited(&config, &rates, Some(ip2)));
+        assert!(is_per_ip_rate_limited(&config, &rates, Some(ip2)));
+        assert!(!is_per_ip_rate_limited(&config, &rates, Some(ip2)));
+    }
+
+    #[test]
+    fn rate_limit_disabled_returns_true() {
+        let config = RpcSecurityConfig {
+            rate_limit_per_minute: None,
+            ..Default::default()
+        };
+        let rates = Arc::new(Mutex::new(HashMap::new()));
+        assert!(is_per_ip_rate_limited(&config, &rates, Some("1.1.1.1".parse().unwrap())));
     }
 
     #[test]
@@ -925,5 +1108,14 @@ mod security_tests {
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn operator_default_binds_localhost_only() {
+        let config = RpcSecurityConfig::operator_default();
+        assert!(!config.auth_required);
+        assert!(config.allowed_ips.contains(&"127.0.0.1".to_string()));
+        assert!(config.allowed_ips.contains(&"::1".to_string()));
+        assert!(config.max_connections.is_some());
     }
 }

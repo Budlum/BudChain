@@ -1,0 +1,39 @@
+[package]
+name = "budlum-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.budlum-core]
+path = ".."
+
+[[bin]]
+name = "block_deserialize"
+path = "fuzz_targets/block_deserialize.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "transaction_deserialize"
+path = "fuzz_targets/transaction_deserialize.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "snapshot_deserialize"
+path = "fuzz_targets/snapshot_deserialize.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "consensus_validate"
+path = "fuzz_targets/consensus_validate.rs"
+test = false
+doc = false
